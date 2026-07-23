@@ -14,3 +14,7 @@ ragchecker
 
 [providers]
 openai>=1.0
+
+[systems]
+graphrag==3.1.0
+lightrag-hku==1.4.14

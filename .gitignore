@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# environment files
+.env
+
 # Downloaded corpora, embeddings, traces, model outputs, and API-derived scores.
 data/raw/
 data/prepared/

@@ -14,10 +14,10 @@ providers = ["openai>=1.0"]
 analysis = ["numpy>=1.26", "scipy>=1.11", "matplotlib>=3.8"]
 evaluation = ["ragas>=0.2", "ragchecker"]
 data = ["datasets>=3", "huggingface_hub>=0.24"]
+systems = ["graphrag==3.1.0", "lightrag-hku==1.4.14"]
 
 [project.scripts]
 ragstudy = "ragstudy.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

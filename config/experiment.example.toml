@@ -83,13 +83,12 @@ kind = "native"
 
 [systems.graphrag]
 kind = "command"
-# Pin an official GraphRAG version in a dedicated environment, then set these.
-index_command = ""
-query_command = ""
+# Requires the pinned `systems` extra; see scripts/graphrag_bridge.py.
+index_command = ".venv/bin/python scripts/graphrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
+query_command = ".venv/bin/python scripts/graphrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"
 
 [systems.lightrag]
 kind = "command"
-# Pin an official LightRAG version in a dedicated environment, then set these.
-index_command = ""
-query_command = ""
-
+# Requires the pinned `systems` extra; see scripts/lightrag_bridge.py.
+index_command = ".venv/bin/python scripts/lightrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
+query_command = ".venv/bin/python scripts/lightrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"

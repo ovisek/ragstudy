@@ -30,7 +30,7 @@ python3 -m venv .venv
 # Install the research harness plus analysis, OpenAI-provider, dataset, and
 # evaluation dependencies into this workspace only.
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e '.[analysis,providers,data,evaluation]'
+.venv/bin/python -m pip install -e '.[analysis,providers,data,evaluation,systems]'
 
 # Confirm that the local command is available and the included tests pass.
 .venv/bin/ragstudy --help
@@ -92,6 +92,25 @@ The preparation command deduplicates documents by SHA-256 of the original
 text, preserves the first stable ID, emits an immutable `evaluation_set.jsonl`,
 and records the complete provenance in the data register.
 
+### UltraDomain conversion
+
+UltraDomain domain splits contain a question, answers, and a repeated source
+context on each row. Convert a split into the two canonical inputs before
+running `prepare`:
+
+```bash
+python scripts/convert_ultradomain_jsonl.py \
+  --input data/raw/ultradomain_agriculture/agriculture.jsonl \
+  --domain agriculture
+```
+
+This writes `agriculture_documents.jsonl` (one record per `context_id`) and
+`agriculture_questions.jsonl` (one record per source row) beside the raw split.
+It maps `_id` to the question ID, `input` to `question`, `answers` to
+`reference_answer`, and `context_id` to both the document ID and question
+evidence. It refuses to overwrite existing output; pass `--force` only when
+regenerating those inputs intentionally.
+
 ## Command sequence
 
 ```bash
@@ -136,9 +155,11 @@ configuration and start a new run identifier instead.
 ## Adapter contract
 
 NaiveRAG runs directly when `openai` is installed and the configured API key is
-available. GraphRAG and LightRAG are kept version-isolated behind command
-adapters because their APIs change frequently. Configure the `index_command`
-and `query_command` templates in the TOML after pinning their versions.
+available. GraphRAG and LightRAG run through the included, version-pinned
+bridges: `scripts/graphrag_bridge.py` (GraphRAG 3.1.0) and
+`scripts/lightrag_bridge.py` (LightRAG 1.4.14). Their commands are already set
+in `config/experiment.toml`; install the `systems` dependency extra before
+running them.
 Templates receive `{workspace}`, `{input}`, `{question}`, `{method}`, and
 `{output}`. The query command must write one JSON object to `{output}` with
 `answer`, optional `contexts`, optional `usage`, and optional `metadata`.

@@ -15,3 +15,6 @@ Requires-Dist: ragchecker; extra == "evaluation"
 Provides-Extra: data
 Requires-Dist: datasets>=3; extra == "data"
 Requires-Dist: huggingface_hub>=0.24; extra == "data"
+Provides-Extra: systems
+Requires-Dist: graphrag==3.1.0; extra == "systems"
+Requires-Dist: lightrag-hku==1.4.14; extra == "systems"

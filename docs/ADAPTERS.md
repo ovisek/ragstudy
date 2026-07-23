@@ -71,19 +71,18 @@ supports it, and export its token tracker result into `usage`. Export retrieved
 chunk IDs/text where the version permits; otherwise write `metadata` explaining
 the unavailable trace.
 
-## Recommended command-template pattern
+## Included command-template pattern
 
-Create two version-controlled wrapper scripts in each pinned environment and
-set TOML entries along these lines:
+The project includes the two version-controlled bridge scripts. The active
+configuration already has these command entries:
 
 ```toml
 [systems.graphrag]
 kind = "command"
-index_command = "/absolute/pinned-env/bin/python adapters/graphrag_bridge.py index --workspace {workspace} --input {input} --output {output}"
-query_command = "/absolute/pinned-env/bin/python adapters/graphrag_bridge.py query --workspace {workspace} --question {question} --method {method} --output {output}"
+index_command = ".venv/bin/python scripts/graphrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
+query_command = ".venv/bin/python scripts/graphrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"
 ```
 
-The same shape applies to LightRAG. Store the bridge scripts and their lock
-files in the study archive; the complete command template is also embedded in
-the experiment manifest.
-
+The same shape is configured for LightRAG. Store the bridge scripts and their
+lock files in the study archive; the complete command template is also embedded
+in the experiment manifest.
