@@ -1,0 +1,2 @@
+[console_scripts]
+ragstudy = ragstudy.cli:main

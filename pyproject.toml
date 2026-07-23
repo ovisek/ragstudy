@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragstudy"
+version = "0.1.0"
+description = "Reproducible GraphRAG, LightRAG, and NaiveRAG thesis experiment harness"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+providers = ["openai>=1.0"]
+analysis = ["numpy>=1.26", "scipy>=1.11", "matplotlib>=3.8"]
+evaluation = ["ragas>=0.2", "ragchecker"]
+data = ["datasets>=3", "huggingface_hub>=0.24"]
+
+[project.scripts]
+ragstudy = "ragstudy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

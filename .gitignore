@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Downloaded corpora, embeddings, traces, model outputs, and API-derived scores.
+data/raw/
+data/prepared/
+results/
+
+# Study-specific provider credentials and frozen pricing/model selections.
+config/experiment.toml
+

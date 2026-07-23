@@ -1,0 +1,16 @@
+
+[analysis]
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+
+[data]
+datasets>=3
+huggingface_hub>=0.24
+
+[evaluation]
+ragas>=0.2
+ragchecker
+
+[providers]
+openai>=1.0

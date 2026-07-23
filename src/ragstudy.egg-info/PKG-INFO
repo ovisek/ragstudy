@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: ragstudy
+Version: 0.1.0
+Summary: Reproducible GraphRAG, LightRAG, and NaiveRAG thesis experiment harness
+Requires-Python: >=3.10
+Provides-Extra: providers
+Requires-Dist: openai>=1.0; extra == "providers"
+Provides-Extra: analysis
+Requires-Dist: numpy>=1.26; extra == "analysis"
+Requires-Dist: scipy>=1.11; extra == "analysis"
+Requires-Dist: matplotlib>=3.8; extra == "analysis"
+Provides-Extra: evaluation
+Requires-Dist: ragas>=0.2; extra == "evaluation"
+Requires-Dist: ragchecker; extra == "evaluation"
+Provides-Extra: data
+Requires-Dist: datasets>=3; extra == "data"
+Requires-Dist: huggingface_hub>=0.24; extra == "data"
