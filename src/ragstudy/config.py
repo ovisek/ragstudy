@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import os
-import tomllib
+import sys
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,7 @@ class Config:
 
 
 def load_config(path: str | Path) -> Config:
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
     path = Path(path).resolve()
     with path.open("rb") as source:
         data = tomllib.load(source)

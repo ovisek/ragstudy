@@ -10,10 +10,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
-import tomllib
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
 def read_jsonl(path: Path):
@@ -56,18 +65,23 @@ def main() -> int:
         return 2
     client = AsyncOpenAI(api_key=key, base_url=provider["base_url"])
     llm = llm_factory(provider["judge_model"], client=client)
-    embeddings = embedding_factory("openai", model=provider["embedding_model"], client=client)
+    embeddings = embedding_factory(
+        provider["embedding_model"],
+        base_url=provider["base_url"],
+        interface="legacy",
+    )
     result = evaluate(Dataset.from_list(dataset_rows), llm=llm, embeddings=embeddings, experiment_name=config["study"]["name"], allow_nest_asyncio=False)
     table = result.to_pandas()
-    keys = {row["trace_key"]: row for row in source_rows}
+    if len(table) != len(source_rows):
+        raise RuntimeError(f"RAGAS returned {len(table)} results for {len(source_rows)} input rows")
     metric_names = ("answer_relevancy", "context_precision", "faithfulness", "context_recall")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as target:
-        for _, result_row in table.iterrows():
-            source = keys[result_row["trace_key"]]
+        for source, (_, result_row) in zip(source_rows, table.iterrows()):
             for metric in metric_names:
-                if metric in result_row and result_row[metric] is not None:
-                    target.write(json.dumps({"dataset": source["dataset"], "system": source["system"], "question_id": source["question_id"], "metric": metric, "value": float(result_row[metric]), "backend": "ragas", "coverage": "available", "evaluator_model": provider["judge_model"]}) + "\n")
+                value = result_row.get(metric)
+                if value is not None and math.isfinite(float(value)):
+                    target.write(json.dumps({"dataset": source["dataset"], "system": source["system"], "question_id": source["question_id"], "metric": metric, "value": float(value), "backend": "ragas", "coverage": "available", "evaluator_model": provider["judge_model"]}) + "\n")
     return 0
 
 

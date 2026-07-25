@@ -12,8 +12,12 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 def config(path: Path) -> dict:
@@ -37,6 +41,13 @@ def environment(study: dict) -> dict[str, str]:
     # of .env files and pass it only to the child CLI process.
     env["GRAPHRAG_API_KEY"] = api_key
     env["GRAPHRAG_LLM_API_KEY"] = api_key
+    ca_bundle = provider.get("ca_bundle")
+    if ca_bundle:
+        ca_path = Path(ca_bundle).expanduser()
+        if not ca_path.is_file():
+            raise RuntimeError(f"Configured provider.ca_bundle is not a readable file: {ca_path}")
+        env["SSL_CERT_FILE"] = str(ca_path)
+        env["REQUESTS_CA_BUNDLE"] = str(ca_path)
     return env
 
 
@@ -63,9 +74,9 @@ def configure_settings(workspace: Path, study: dict) -> None:
     models = settings.setdefault("models", {})
     provider, common = study["provider"], study["common"]
     chat = models.setdefault("default_chat_model", {})
-    chat.update({"type": "openai_chat", "model": provider["generator_model"], "api_key": "${GRAPHRAG_API_KEY}", "encoding_model": "cl100k_base"})
+    chat.update({"type": "openai_chat", "model": provider["generator_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "encoding_model": "cl100k_base"})
     embedding = models.setdefault("default_embedding_model", {})
-    embedding.update({"type": "openai_embedding", "model": provider["embedding_model"], "api_key": "${GRAPHRAG_API_KEY}", "encoding_model": "cl100k_base"})
+    embedding.update({"type": "openai_embedding", "model": provider["embedding_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "encoding_model": "cl100k_base"})
     # The v3 generated defaults own the rest of the workflow configuration.
     chunks = settings.setdefault("chunks", {})
     chunks["size"] = int(common["chunk_tokens"])

@@ -2,7 +2,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
 
+# build
+build/
 # environment files
 .env
 
@@ -14,3 +17,7 @@ results/
 # Study-specific provider credentials and frozen pricing/model selections.
 config/experiment.toml
 
+
+src/ragstudy.egg-info/PKG-INFO
+src/ragstudy.egg-info/requires.txt
+src/ragstudy.egg-info/SOURCES.txt

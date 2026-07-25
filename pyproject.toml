@@ -7,14 +7,15 @@ name = "ragstudy"
 version = "0.1.0"
 description = "Reproducible GraphRAG, LightRAG, and NaiveRAG thesis experiment harness"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["python-dotenv>=1.0", "tomli>=2.0; python_version < '3.11'"]
 
 [project.optional-dependencies]
 providers = ["openai>=1.0"]
 analysis = ["numpy>=1.26", "scipy>=1.11", "matplotlib>=3.8"]
-evaluation = ["ragas>=0.2", "ragchecker"]
+evaluation = ["ragas==0.4.3", "ragchecker", "langchain-community<0.4"]
 data = ["datasets>=3", "huggingface_hub>=0.24"]
-systems = ["graphrag==3.1.0", "lightrag-hku==1.4.14"]
+systems = ["graphrag", "lightrag-hku"]
+# systems = ["lightrag-hku"]
 
 [project.scripts]
 ragstudy = "ragstudy.cli:main"

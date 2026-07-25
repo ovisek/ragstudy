@@ -152,6 +152,40 @@ ragstudy --config config/experiment.toml thesis
 trace is never overwritten. Delete neither failures nor timeouts; correct the
 configuration and start a new run identifier instead.
 
+### Resume interrupted GraphRAG indexing in the same workspace
+
+If GraphRAG indexing is interrupted (for example `Ctrl+C`), rerunning
+`ragstudy ... run` creates a new `run_id` and a new workspace. To continue the
+same GraphRAG workspace (and reuse its cache), rerun GraphRAG directly against
+that existing `--root` directory:
+
+```bash
+# Use the same shell environment as the original run.
+export OPENAI_API_KEY="your-key-here"
+
+# Optional if your proxy uses a custom CA.
+export SSL_CERT_FILE="/absolute/path/to/company-root-ca.pem"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+
+.venv/bin/graphrag index \
+  --root results/runs/<run_id>/<dataset>/graphrag \
+  --method standard
+```
+
+Progress is written to:
+
+```bash
+tail -f results/runs/<run_id>/<dataset>/graphrag/logs/indexing-engine.log
+```
+
+Notes:
+
+- `index_run.json` and `index_command_report.json` are written by the harness
+  after `adapter.index(...)` returns. If the process is interrupted before
+  completion, those final files may not exist yet for that run.
+- To finish the full harness flow after manual GraphRAG completion, start a new
+  `ragstudy run` for normal trace/manifests or add a resume mode in the harness.
+
 ## Adapter contract
 
 NaiveRAG runs directly when `openai` is installed and the configured API key is

@@ -11,8 +11,13 @@ import argparse
 import asyncio
 import json
 import os
-import tomllib
+import sys
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 def config(path: Path) -> dict:
