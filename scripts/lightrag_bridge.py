@@ -10,9 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
+
+from ragstudy.config import provider_api_key
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -38,14 +39,14 @@ async def build_rag(study: dict, workspace: Path):
     except ImportError as exc:
         raise RuntimeError("Install the pinned systems extra before running LightRAG") from exc
     provider, common = study["provider"], study["common"]
-    api_key = os.getenv(provider["api_key_env"])
+    api_key = provider_api_key(provider)
     if not api_key:
-        raise RuntimeError(f"Missing {provider['api_key_env']}")
+        raise RuntimeError(f"Missing {provider.get('api_key_env', 'provider API key')}")
 
     async def completion(prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs):
         return await openai_complete_if_cache(provider["generator_model"], prompt, system_prompt=system_prompt, history_messages=history_messages, api_key=api_key, base_url=provider["base_url"], keyword_extraction=keyword_extraction, **kwargs)
 
-    @wrap_embedding_func_with_attrs(embedding_dim=1536, max_token_size=8192, model_name=provider["embedding_model"])
+    @wrap_embedding_func_with_attrs(embedding_dim=int(provider.get("embedding_dimensions", 1536)), max_token_size=8192, model_name=provider["embedding_model"])
     async def embeddings(texts):
         return await openai_embed.func(texts, model=provider["embedding_model"], api_key=api_key, base_url=provider["base_url"])
 

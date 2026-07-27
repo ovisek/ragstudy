@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import shlex
 import subprocess
 import time
@@ -11,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .config import Config
+from .config import Config, provider_api_key
 from .io import read_jsonl, write_json, write_jsonl
 from .models import Document, Question, Usage
 
@@ -79,9 +78,9 @@ class NaiveRagAdapter(RagAdapter):
         except ImportError as exc:
             raise RuntimeError("Install the providers extra: pip install -e '.[providers]'") from exc
         provider = config.data["provider"]
-        api_key = os.environ.get(provider["api_key_env"])
+        api_key = provider_api_key(provider)
         if not api_key:
-            raise RuntimeError(f"Missing {provider['api_key_env']}")
+            raise RuntimeError(f"Missing {provider.get('api_key_env', 'provider API key')}")
         self.client = OpenAI(api_key=api_key, base_url=provider["base_url"])
         self.provider = provider
         self.common = config.data["common"]

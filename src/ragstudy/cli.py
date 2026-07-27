@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"prepare": report, "update_split": split}, indent=2))
         return 0
     if args.command == "validate":
-        errors = readiness(config)
+        errors = readiness(config) + validate_run_config(config, list(config.data["systems"]))
         if errors:
             print("\n".join(errors), file=sys.stderr)
             return 2

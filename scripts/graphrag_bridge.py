@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ragstudy.config import provider_api_key
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -33,9 +35,9 @@ def run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[
 
 def environment(study: dict) -> dict[str, str]:
     provider = study["provider"]
-    api_key = os.getenv(provider["api_key_env"])
+    api_key = provider_api_key(provider)
     if not api_key:
-        raise RuntimeError(f"Missing {provider['api_key_env']}")
+        raise RuntimeError(f"Missing {provider.get('api_key_env', 'provider API key')}")
     env = os.environ.copy()
     # GraphRAG uses its own environment-variable name; keep the source key out
     # of .env files and pass it only to the child CLI process.

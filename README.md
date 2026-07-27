@@ -71,6 +71,47 @@ Otherwise, keep using `.venv/bin/ragstudy` and `.venv/bin/python` explicitly.
    then use `prepare`.
    A source-specific acquisition worksheet is in `docs/DATA_SOURCES.md`.
 
+### Local Ollama models
+
+The native adapter, GraphRAG bridge, LightRAG bridge, and standalone RAGAS
+script also support downloaded Ollama models. Replace the `[provider]` values
+with an explicit local profile; use the exact tags reported by `ollama list`:
+
+```toml
+[provider]
+type = "ollama"
+base_url = "http://localhost:11434/v1"
+generator_model = "llama3.2"
+embedding_model = "nomic-embed-text"
+judge_model = "llama3.2"
+embedding_dimensions = 768
+generator_input_per_million = 0.0
+generator_output_per_million = 0.0
+embedding_input_per_million = 0.0
+judge_input_per_million = 0.0
+judge_output_per_million = 0.0
+```
+
+Download the configured tags before running an experiment. The local profile
+does not use `api_key_env` or any API-key environment variable:
+
+```bash
+ollama pull llama3.2
+ollama pull nomic-embed-text
+ollama list
+```
+
+Set `embedding_dimensions` to the dimension emitted by the chosen embedding
+model; LightRAG needs this value when it creates vector storage. Run the same
+experiment commands after configuring Ollama, including all three systems and
+the optional evaluator:
+
+```bash
+ragstudy --config config/experiment.toml run --phase pilot --systems naive,graphrag,lightrag
+python scripts/run_ragas.py --config config/experiment.toml \
+  --input results/evaluation/ragas_input.jsonl --output results/evaluation/ragas_metrics.jsonl
+```
+
 ## Canonical input contract
 
 For each dataset, provide two JSONL files. These files are deliberately

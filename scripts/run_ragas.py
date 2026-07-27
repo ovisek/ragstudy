@@ -11,11 +11,11 @@ import argparse
 import asyncio
 import json
 import math
-import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from ragstudy.config import provider_api_key
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -38,9 +38,9 @@ def main() -> int:
     args = parser.parse_args()
     config = tomllib.loads(args.config.read_text(encoding="utf-8"))
     provider = config["provider"]
-    key = os.environ.get(provider["api_key_env"])
+    key = provider_api_key(provider)
     if not key:
-        raise SystemExit(f"Missing {provider['api_key_env']}")
+        raise SystemExit(f"Missing {provider.get('api_key_env', 'provider API key')}")
     try:
         from datasets import Dataset
         from openai import AsyncOpenAI
@@ -66,9 +66,9 @@ def main() -> int:
     client = AsyncOpenAI(api_key=key, base_url=provider["base_url"])
     llm = llm_factory(provider["judge_model"], client=client)
     embeddings = embedding_factory(
-        provider["embedding_model"],
-        base_url=provider["base_url"],
-        interface="legacy",
+        "openai",
+        model=provider["embedding_model"],
+        client=client,
     )
     result = evaluate(Dataset.from_list(dataset_rows), llm=llm, embeddings=embeddings, experiment_name=config["study"]["name"], allow_nest_asyncio=False)
     table = result.to_pandas()
