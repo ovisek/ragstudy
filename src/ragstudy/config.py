@@ -50,6 +50,12 @@ def load_config(path: str | Path) -> Config:
 def validate_run_config(config: Config, systems: list[str]) -> list[str]:
     errors: list[str] = []
     provider = config.data["provider"]
+    requests_per_minute = provider.get("requests_per_minute", 30)
+    if isinstance(requests_per_minute, bool) or not isinstance(requests_per_minute, int) or requests_per_minute < 1:
+        errors.append("provider.requests_per_minute must be a positive integer")
+    concurrent_workers = config.data["common"].get("concurrent_workers", 1)
+    if isinstance(concurrent_workers, bool) or not isinstance(concurrent_workers, int) or concurrent_workers < 1:
+        errors.append("common.concurrent_workers must be a positive integer (defaults to 1)")
     native_needed = any(config.system(item).get("kind") == "native" for item in systems)
     if native_needed:
         for item in ("generator_model", "embedding_model", "api_key_env"):
@@ -65,7 +71,7 @@ def validate_run_config(config: Config, systems: list[str]) -> list[str]:
                 if not str(item.get(field, "")).strip():
                     errors.append(f"systems.{system}.{field} must be set")
         if system == "lightrag":
-            concurrency = item.get("chunk_llm_concurrency", 1)
-            if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
-                errors.append("systems.lightrag.chunk_llm_concurrency must be a positive integer (use 1 for serial chunk extraction)")
+            dimension = provider.get("embedding_dimension")
+            if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+                errors.append("provider.embedding_dimension must be a positive integer for LightRAG")
     return errors

@@ -137,7 +137,7 @@ class RunResumeTest(unittest.TestCase):
             data={
                 "study": {"output_root": "results", "data_root": "data"},
                 "common": {},
-                "provider": {},
+                "provider": {"embedding_dimension": 1536},
                 "datasets": {"dataset": {}},
                 "systems": {"lightrag": {"kind": "command", "index_command": "unused", "query_command": "unused"}},
             },
@@ -176,6 +176,44 @@ class RunResumeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "incompatible"):
             run(self.config, "pilot", ["lightrag"], resume=True, index_retries=0)
 
+    def test_resume_allows_operational_rate_and_concurrency_changes(self) -> None:
+        self.config.data["provider"]["requests_per_minute"] = 30
+        self.config.data["common"]["concurrent_workers"] = 1
+        with patch("ragstudy.runner.build_adapter", return_value=FakeAdapter()):
+            first = run(self.config, "pilot", ["lightrag"], index_retries=0)
+
+        self.config.data["provider"]["requests_per_minute"] = 20
+        self.config.data["common"]["concurrent_workers"] = 2
+        FakeAdapter.complete = True
+        with patch("ragstudy.runner.build_adapter", return_value=FakeAdapter()):
+            resumed = run(self.config, "pilot", ["lightrag"], resume=True, index_retries=0)
+
+        self.assertEqual(resumed["run_id"], first["run_id"])
+        manifest = read_json(self.config.output_root / "runs" / first["run_id"] / "run_manifest.json")
+        self.assertEqual(manifest["resume_specs"][-1]["spec"]["config"]["provider"]["requests_per_minute"], 20)
+        self.assertEqual(manifest["resume_specs"][-1]["spec"]["config"]["common"]["concurrent_workers"], 2)
+
+    def test_graphrag_resume_ignores_lightrag_embedding_dimension(self) -> None:
+        self.config.data["systems"]["graphrag"] = {"kind": "command", "index_command": "unused", "query_command": "unused"}
+        self.config.data["provider"].pop("embedding_dimension")
+        with patch("ragstudy.runner.build_adapter", return_value=FakeAdapter()):
+            first = run(self.config, "pilot", ["graphrag"], index_retries=0)
+
+        self.config.data["provider"]["embedding_dimension"] = 2048
+        FakeAdapter.complete = True
+        with patch("ragstudy.runner.build_adapter", return_value=FakeAdapter()):
+            resumed = run(self.config, "pilot", ["graphrag"], resume=True, index_retries=0)
+
+        self.assertEqual(resumed["run_id"], first["run_id"])
+
+    def test_lightrag_resume_rejects_embedding_dimension_change(self) -> None:
+        with patch("ragstudy.runner.build_adapter", return_value=FakeAdapter()):
+            run(self.config, "pilot", ["lightrag"], index_retries=0)
+
+        self.config.data["provider"]["embedding_dimension"] = 2048
+        with self.assertRaisesRegex(RuntimeError, "incompatible"):
+            run(self.config, "pilot", ["lightrag"], resume=True, index_retries=0)
+
     def test_partial_index_requires_override_and_marks_trace(self) -> None:
         with patch("ragstudy.runner.build_adapter", return_value=FakeAdapter()):
             result = run(self.config, "pilot", ["lightrag"], allow_partial_index=True, index_retries=0)
@@ -185,15 +223,15 @@ class RunResumeTest(unittest.TestCase):
         self.assertFalse(traces[-1]["metadata"]["index_complete"])
         self.assertEqual(traces[-1]["metadata"]["failed_index_units"], ["d1"])
 
-    def test_lightrag_chunk_concurrency_defaults_to_serial_and_must_be_positive(self) -> None:
-        system = self.config.data["systems"]["lightrag"]
-        system["chunk_llm_concurrency"] = 1
+    def test_concurrent_workers_defaults_to_serial_and_must_be_positive(self) -> None:
+        common = self.config.data["common"]
+        common["concurrent_workers"] = 1
         self.assertEqual(validate_run_config(self.config, ["lightrag"]), [])
 
-        system["chunk_llm_concurrency"] = 0
+        common["concurrent_workers"] = 0
         self.assertIn("positive integer", " ".join(validate_run_config(self.config, ["lightrag"])))
 
-        del system["chunk_llm_concurrency"]
+        del common["concurrent_workers"]
         self.assertEqual(validate_run_config(self.config, ["lightrag"]), [])
 
 

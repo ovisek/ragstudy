@@ -255,6 +255,9 @@ class CommandAdapter(RagAdapter):
         # Templates are research-controlled config, recorded in the manifest.
         environment = os.environ.copy()
         environment["PYTHONUNBUFFERED"] = "1"
+        provider = self.config.data.get("provider", {})
+        environment["RAGSTUDY_REQUESTS_PER_MINUTE"] = str(provider.get("requests_per_minute", 30))
+        environment["RAGSTUDY_CONCURRENT_WORKERS"] = str(self.config.data.get("common", {}).get("concurrent_workers", 1))
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=environment, start_new_session=True)
         stdout_lines: deque[str] = deque(maxlen=4000)
         stderr_lines: deque[str] = deque(maxlen=4000)

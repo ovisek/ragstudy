@@ -19,32 +19,29 @@ command is explicitly run.
 
 ## Install in this Codex workspace
 
-Run these commands from the workspace root:
+The complete experiment environment requires Python 3.13.x. Run these commands
+from the workspace root:
 
 ```bash
 cd /Users/ovisek/Documents/Codex/2026-07-22/bas
 
-# Create once; it is safe to reuse on later sessions.
-python3 -m venv .venv
-
-# Install the research harness plus analysis, OpenAI-provider, dataset, and
-# evaluation dependencies into this workspace only.
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e '.[analysis,providers,data,evaluation,systems]'
+# Create or update .venv with the Python version in .python-version and install
+# the research harness plus every optional dependency group.
+uv sync --all-extras
 
 # Confirm that the local command is available and the included tests pass.
-.venv/bin/ragstudy --help
-.venv/bin/python -m unittest discover -s tests -v
+uv run ragstudy --help
+uv run python -m unittest discover -s tests -v
 ```
 
-No system-wide installation is required. If you prefer an activated shell for
-the rest of the session, run:
+No system-wide package installation is required. If you prefer an activated
+shell for the rest of the session, run:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Otherwise, keep using `.venv/bin/ragstudy` and `.venv/bin/python` explicitly.
+Otherwise, keep using `uv run ragstudy` and `uv run python` explicitly.
 
 ## Before the first paid run
 
@@ -126,6 +123,24 @@ This writes `agriculture_subset_documents.jsonl` and
 `agriculture_subset_questions.jsonl`. Documents are selected by stable ID;
 questions are selected only when their evidence document is in that subset.
 
+### GraphRAG-Bench Medical conversion
+
+The released Medical corpus is one large source context. The following command
+creates a small, source-preserving sample: six contiguous whitespace-aligned
+chunks of that corpus plus the first three published questions. It never builds
+documents from question answers or evidence strings.
+
+```bash
+python scripts/convert_graphrag_bench_json.py \
+  --corpus data/raw/graphrag_bench_medical/Datasets/Corpus/medical.json \
+  --questions data/raw/graphrag_bench_medical/Datasets/Questions/medical_questions.json \
+  --output-prefix data/raw/graphrag_bench_medical/medical_subset
+```
+
+This produces `medical_subset_documents.jsonl` and
+`medical_subset_questions.jsonl`; each question retains its published ID,
+answer, question type, evidence, and evidence relations.
+
 ## Command sequence
 
 ```bash
@@ -190,16 +205,34 @@ Checkpoint granularity is backend-safe: NaiveRAG and LightRAG checkpoint each
 document, while GraphRAG checkpoints its corpus-level workflow and reuses its
 native cache. `Ctrl+C` records the active attempt as interrupted and exits 130.
 
-LightRAG chunk-level LLM extraction concurrency is configured independently:
+The provider request budget and shared worker concurrency are configured independently:
 
 ```toml
-[systems.lightrag]
-chunk_llm_concurrency = 4
+[provider]
+requests_per_minute = 30
+embedding_dimension = 2048
+
+[common]
+concurrent_workers = 1
 ```
 
-Use `1` for serial chunk extraction. If the field is omitted, the bridge safely
-defaults to `1`. Values above `1` are passed to LightRAG as its instance-wide
-`llm_model_max_async` limit; embedding and document concurrency are unchanged.
+For a 40 RPM provider limit, `30` RPM preserves 25% headroom. GraphRAG uses its
+native sliding-window limiter, while LightRAG spaces completion and embedding
+requests through a shared pacer. `concurrent_workers` applies to whichever
+systems are selected and defaults to `1` when omitted. These operational rate
+and concurrency fields may be changed before `--resume`;
+they are recorded in the run manifest but do not invalidate resume compatibility.
+They can also be overridden for a single launch without editing TOML:
+
+```bash
+.venv/bin/ragstudy --config config/experiment.toml run \
+  --phase pilot --systems graphrag --resume \
+  --concurrent-workers 8 --requests-per-minute 30
+```
+
+GraphRAG fixes its worker-pool size when the indexing process starts. To change
+it during a long run, interrupt the process and resume with a new override; the
+native GraphRAG cache avoids repeating completed LLM calls.
 
 If index failures remain, queries for that index are skipped and the command
 exits nonzero. For diagnostic use only, queries may be forced against the

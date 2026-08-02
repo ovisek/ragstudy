@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -59,7 +60,28 @@ def _run_spec(config: Config, phase: str, systems: list[str], repetition: int) -
 
 
 def _spec_fingerprint(spec: dict[str, object]) -> str:
-    return sha256_text(json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    compatible = deepcopy(spec)
+    config = compatible.get("config", {})
+    if isinstance(config, dict):
+        common = config.get("common", {})
+        if isinstance(common, dict):
+            common.pop("concurrent_workers", None)
+        provider = config.get("provider", {})
+        if isinstance(provider, dict):
+            provider.pop("requests_per_minute", None)
+            selected_systems = compatible.get("systems", [])
+            if isinstance(selected_systems, list) and "lightrag" not in selected_systems:
+                provider.pop("embedding_dimension", None)
+        configured_systems = config.get("systems", {})
+        if isinstance(configured_systems, dict):
+            # Ignore legacy per-system operational concurrency fields too.
+            lightrag = configured_systems.get("lightrag", {})
+            if isinstance(lightrag, dict):
+                lightrag.pop("chunk_llm_concurrency", None)
+            graphrag = configured_systems.get("graphrag", {})
+            if isinstance(graphrag, dict):
+                graphrag.pop("concurrent_requests", None)
+    return sha256_text(json.dumps(compatible, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def _resume_run(config: Config, spec: dict[str, object]) -> tuple[str, Path, dict[str, object]]:
@@ -77,7 +99,9 @@ def _resume_run(config: Config, spec: dict[str, object]) -> tuple[str, Path, dic
         raise RuntimeError("No incomplete run matches the requested phase, systems, and repetition")
     _, manifest_path, manifest = max(candidates, key=lambda item: item[0])
     expected = _spec_fingerprint(spec)
-    if manifest.get("compatibility_fingerprint") != expected:
+    previous_spec = manifest.get("spec")
+    previous_matches = isinstance(previous_spec, dict) and _spec_fingerprint(previous_spec) == expected
+    if not previous_matches and manifest.get("compatibility_fingerprint") != expected:
         raise RuntimeError(f"Latest incomplete run {manifest.get('run_id')} is incompatible because its configuration or prepared inputs changed; start a fresh run")
     return str(manifest["run_id"]), manifest_path.parent, manifest
 
@@ -97,7 +121,8 @@ def run(config: Config, phase: str, systems: list[str], repetition: int = 1, *, 
     now = datetime.now(timezone.utc).isoformat()
     if resume:
         run_id, run_root, manifest = _resume_run(config, spec)
-        manifest.update({"status": "running", "resumed_at": now, "index_retries": index_retries, "allow_partial_index": allow_partial_index})
+        manifest.update({"status": "running", "resumed_at": now, "compatibility_fingerprint": _spec_fingerprint(spec), "index_retries": index_retries, "allow_partial_index": allow_partial_index})
+        manifest.setdefault("resume_specs", []).append({"resumed_at": now, "spec": spec})
         print(f"Resuming run {run_id}", flush=True)
     else:
         run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"

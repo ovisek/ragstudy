@@ -40,6 +40,8 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--resume", action="store_true", help="Resume the latest compatible incomplete run")
     run_parser.add_argument("--allow-partial-index", action="store_true", help="Run queries against an incomplete index and mark their traces")
     run_parser.add_argument("--index-retries", default=2, type=int, help="Retries per failed index checkpoint unit (default: 2)")
+    run_parser.add_argument("--concurrent-workers", type=int, help="Override worker concurrency for GraphRAG and LightRAG for this launch/resume")
+    run_parser.add_argument("--requests-per-minute", type=int, help="Override the provider RPM budget for this launch/resume")
     update = commands.add_parser("run-update", help="Run auditable 90/10 update workflow")
     update.add_argument("--systems", default="naive,graphrag,lightrag")
     score = commands.add_parser("score", help="Export evaluator input, compute deterministic proxies, or import scores")
@@ -59,6 +61,13 @@ def readiness(config) -> list[str]:
             if not (directory / filename).exists():
                 errors.append(f"{dataset}: missing {directory / filename}")
     return errors
+
+
+def apply_run_overrides(config, args) -> None:
+    if args.requests_per_minute is not None:
+        config.data["provider"]["requests_per_minute"] = args.requests_per_minute
+    if args.concurrent_workers is not None:
+        config.data["common"]["concurrent_workers"] = args.concurrent_workers
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command in {"run", "run-update"}:
         systems = _systems(args.systems)
+        if args.command == "run":
+            apply_run_overrides(config, args)
         missing = [name for name in systems if name not in config.data["systems"]]
         errors = readiness(config) + [f"Unknown system: {item}" for item in missing] + validate_run_config(config, systems)
         if errors:

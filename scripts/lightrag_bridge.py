@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 if sys.version_info >= (3, 11):
@@ -44,11 +45,61 @@ def status_record(value: object) -> dict:
     return json.loads(json.dumps(record, ensure_ascii=False, default=str))
 
 
-def chunk_llm_concurrency(study: dict) -> int:
-    value = study["systems"]["lightrag"].get("chunk_llm_concurrency", 1)
+def concurrent_workers(study: dict) -> int:
+    configured = study["common"].get("concurrent_workers", 1)
+    raw = os.getenv("RAGSTUDY_CONCURRENT_WORKERS")
+    if raw is None:
+        if isinstance(configured, bool) or not isinstance(configured, int) or configured < 1:
+            raise ValueError("common.concurrent_workers must be a positive integer")
+        return configured
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("common.concurrent_workers must be a positive integer") from exc
+    if parsed < 1 or raw.strip() != str(parsed):
+        raise ValueError("common.concurrent_workers must be a positive integer")
+    return parsed
+
+
+def requests_per_minute(study: dict) -> int:
+    configured = study["provider"].get("requests_per_minute", 30)
+    raw = os.getenv("RAGSTUDY_REQUESTS_PER_MINUTE")
+    if raw is None:
+        if isinstance(configured, bool) or not isinstance(configured, int) or configured < 1:
+            raise ValueError("provider.requests_per_minute must be a positive integer")
+        return configured
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("provider.requests_per_minute must be a positive integer") from exc
+    if parsed < 1 or raw.strip() != str(parsed):
+        raise ValueError("provider.requests_per_minute must be a positive integer")
+    return parsed
+
+
+def embedding_dimension(study: dict) -> int:
+    value = study["provider"].get("embedding_dimension")
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("systems.lightrag.chunk_llm_concurrency must be a positive integer")
+        raise ValueError("provider.embedding_dimension must be a positive integer")
     return value
+
+
+class AsyncRequestPacer:
+    """Space API request starts so a fast endpoint cannot exceed its RPM cap."""
+
+    def __init__(self, requests_per_minute: int) -> None:
+        if isinstance(requests_per_minute, bool) or not isinstance(requests_per_minute, int) or requests_per_minute < 1:
+            raise ValueError("provider.requests_per_minute must be a positive integer")
+        self.minimum_interval = 60.0 / requests_per_minute
+        self._lock = asyncio.Lock()
+        self._next_request = 0.0
+
+    async def wait(self) -> None:
+        async with self._lock:
+            delay = self._next_request - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_request = time.monotonic() + self.minimum_interval
 
 
 async def build_rag(study: dict, workspace: Path):
@@ -59,16 +110,20 @@ async def build_rag(study: dict, workspace: Path):
     except ImportError as exc:
         raise RuntimeError("Install the pinned systems extra before running LightRAG") from exc
     provider, common = study["provider"], study["common"]
-    concurrency = chunk_llm_concurrency(study)
+    concurrency = concurrent_workers(study)
+    dimension = embedding_dimension(study)
+    pacer = AsyncRequestPacer(requests_per_minute(study))
     api_key = os.getenv(provider["api_key_env"])
     if not api_key:
         raise RuntimeError(f"Missing {provider['api_key_env']}")
 
     async def completion(prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs):
+        await pacer.wait()
         return await openai_complete_if_cache(provider["generator_model"], prompt, system_prompt=system_prompt, history_messages=history_messages, api_key=api_key, base_url=provider["base_url"], keyword_extraction=keyword_extraction, **kwargs)
 
-    @wrap_embedding_func_with_attrs(embedding_dim=1536, max_token_size=8192, model_name=provider["embedding_model"])
+    @wrap_embedding_func_with_attrs(embedding_dim=dimension, max_token_size=8192, model_name=provider["embedding_model"])
     async def embeddings(texts):
+        await pacer.wait()
         return await openai_embed.func(texts, model=provider["embedding_model"], api_key=api_key, base_url=provider["base_url"])
 
     rag = LightRAG(working_dir=str(workspace), llm_model_func=completion, llm_model_name=provider["generator_model"], llm_model_max_async=concurrency, embedding_func=embeddings, chunk_token_size=int(common["chunk_tokens"]), chunk_overlap_token_size=int(common["chunk_overlap_tokens"]), enable_llm_cache=False, enable_llm_cache_for_entity_extract=False, embedding_cache_config={"enabled": False})
@@ -79,8 +134,8 @@ async def build_rag(study: dict, workspace: Path):
 async def run_index(args: argparse.Namespace, study: dict) -> None:
     workspace, output = Path(args.workspace), Path(args.output)
     rows = [json.loads(line) for line in Path(args.input).read_text(encoding="utf-8").splitlines() if line.strip()]
-    concurrency = chunk_llm_concurrency(study)
-    print(f"LightRAG: initializing workspace {workspace} (chunk LLM concurrency: {concurrency})", flush=True)
+    concurrency = concurrent_workers(study)
+    print(f"LightRAG: initializing workspace {workspace} (concurrent workers: {concurrency})", flush=True)
     rag = await build_rag(study, workspace)
     try:
         print(f"LightRAG: inserting {len(rows)} document(s)", flush=True)
@@ -89,7 +144,7 @@ async def run_index(args: argparse.Namespace, study: dict) -> None:
         unsuccessful = {doc_id: status for doc_id, status in statuses.items() if status["status"] not in {"processed", "completed"}}
         if unsuccessful:
             raise RuntimeError(f"LightRAG did not complete document(s): {json.dumps(unsuccessful, ensure_ascii=False, default=str)}")
-        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "chunk_llm_concurrency": concurrency, "incremental": args.incremental}
+        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "concurrent_workers": concurrency, "incremental": args.incremental}
     finally:
         await rag.finalize_storages()
     output.parent.mkdir(parents=True, exist_ok=True)
