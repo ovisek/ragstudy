@@ -190,6 +190,17 @@ Checkpoint granularity is backend-safe: NaiveRAG and LightRAG checkpoint each
 document, while GraphRAG checkpoints its corpus-level workflow and reuses its
 native cache. `Ctrl+C` records the active attempt as interrupted and exits 130.
 
+LightRAG chunk-level LLM extraction concurrency is configured independently:
+
+```toml
+[systems.lightrag]
+chunk_llm_concurrency = 4
+```
+
+Use `1` for serial chunk extraction. If the field is omitted, the bridge safely
+defaults to `1`. Values above `1` are passed to LightRAG as its instance-wide
+`llm_model_max_async` limit; embedding and document concurrency are unchanged.
+
 If index failures remain, queries for that index are skipped and the command
 exits nonzero. For diagnostic use only, queries may be forced against the
 partial index:

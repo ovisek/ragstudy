@@ -44,6 +44,13 @@ def status_record(value: object) -> dict:
     return json.loads(json.dumps(record, ensure_ascii=False, default=str))
 
 
+def chunk_llm_concurrency(study: dict) -> int:
+    value = study["systems"]["lightrag"].get("chunk_llm_concurrency", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("systems.lightrag.chunk_llm_concurrency must be a positive integer")
+    return value
+
+
 async def build_rag(study: dict, workspace: Path):
     try:
         from lightrag import LightRAG
@@ -52,6 +59,7 @@ async def build_rag(study: dict, workspace: Path):
     except ImportError as exc:
         raise RuntimeError("Install the pinned systems extra before running LightRAG") from exc
     provider, common = study["provider"], study["common"]
+    concurrency = chunk_llm_concurrency(study)
     api_key = os.getenv(provider["api_key_env"])
     if not api_key:
         raise RuntimeError(f"Missing {provider['api_key_env']}")
@@ -63,7 +71,7 @@ async def build_rag(study: dict, workspace: Path):
     async def embeddings(texts):
         return await openai_embed.func(texts, model=provider["embedding_model"], api_key=api_key, base_url=provider["base_url"])
 
-    rag = LightRAG(working_dir=str(workspace), llm_model_func=completion, llm_model_name=provider["generator_model"], embedding_func=embeddings, chunk_token_size=int(common["chunk_tokens"]), chunk_overlap_token_size=int(common["chunk_overlap_tokens"]), enable_llm_cache=False, enable_llm_cache_for_entity_extract=False, embedding_cache_config={"enabled": False})
+    rag = LightRAG(working_dir=str(workspace), llm_model_func=completion, llm_model_name=provider["generator_model"], llm_model_max_async=concurrency, embedding_func=embeddings, chunk_token_size=int(common["chunk_tokens"]), chunk_overlap_token_size=int(common["chunk_overlap_tokens"]), enable_llm_cache=False, enable_llm_cache_for_entity_extract=False, embedding_cache_config={"enabled": False})
     await rag.initialize_storages()
     return rag
 
@@ -71,7 +79,8 @@ async def build_rag(study: dict, workspace: Path):
 async def run_index(args: argparse.Namespace, study: dict) -> None:
     workspace, output = Path(args.workspace), Path(args.output)
     rows = [json.loads(line) for line in Path(args.input).read_text(encoding="utf-8").splitlines() if line.strip()]
-    print(f"LightRAG: initializing workspace {workspace}", flush=True)
+    concurrency = chunk_llm_concurrency(study)
+    print(f"LightRAG: initializing workspace {workspace} (chunk LLM concurrency: {concurrency})", flush=True)
     rag = await build_rag(study, workspace)
     try:
         print(f"LightRAG: inserting {len(rows)} document(s)", flush=True)
@@ -80,7 +89,7 @@ async def run_index(args: argparse.Namespace, study: dict) -> None:
         unsuccessful = {doc_id: status for doc_id, status in statuses.items() if status["status"] not in {"processed", "completed"}}
         if unsuccessful:
             raise RuntimeError(f"LightRAG did not complete document(s): {json.dumps(unsuccessful, ensure_ascii=False, default=str)}")
-        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "incremental": args.incremental}
+        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "chunk_llm_concurrency": concurrency, "incremental": args.incremental}
     finally:
         await rag.finalize_storages()
     output.parent.mkdir(parents=True, exist_ok=True)

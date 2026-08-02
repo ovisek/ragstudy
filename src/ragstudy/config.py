@@ -64,5 +64,8 @@ def validate_run_config(config: Config, systems: list[str]) -> list[str]:
             for field in ("index_command", "query_command"):
                 if not str(item.get(field, "")).strip():
                     errors.append(f"systems.{system}.{field} must be set")
+        if system == "lightrag":
+            concurrency = item.get("chunk_llm_concurrency", 1)
+            if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+                errors.append("systems.lightrag.chunk_llm_concurrency must be a positive integer (use 1 for serial chunk extraction)")
     return errors
-

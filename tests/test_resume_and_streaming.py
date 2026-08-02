@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ragstudy.adapters import CommandAdapter
-from ragstudy.config import Config
+from ragstudy.config import Config, validate_run_config
 from ragstudy.io import read_json, read_jsonl, write_jsonl
 from ragstudy.models import Document, Usage
 from ragstudy.runner import run
@@ -184,6 +184,17 @@ class RunResumeTest(unittest.TestCase):
         traces = read_jsonl(self.config.output_root / "query_traces.jsonl")
         self.assertFalse(traces[-1]["metadata"]["index_complete"])
         self.assertEqual(traces[-1]["metadata"]["failed_index_units"], ["d1"])
+
+    def test_lightrag_chunk_concurrency_defaults_to_serial_and_must_be_positive(self) -> None:
+        system = self.config.data["systems"]["lightrag"]
+        system["chunk_llm_concurrency"] = 1
+        self.assertEqual(validate_run_config(self.config, ["lightrag"]), [])
+
+        system["chunk_llm_concurrency"] = 0
+        self.assertIn("positive integer", " ".join(validate_run_config(self.config, ["lightrag"])))
+
+        del system["chunk_llm_concurrency"]
+        self.assertEqual(validate_run_config(self.config, ["lightrag"]), [])
 
 
 if __name__ == "__main__":

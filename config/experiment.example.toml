@@ -91,6 +91,7 @@ query_command = ".venv/bin/python scripts/graphrag_bridge.py query --config conf
 [systems.lightrag]
 kind = "command"
 index_checkpoint = "document"
+chunk_llm_concurrency = 4 # Set to 1 for serial chunk extraction.
 # Requires the pinned `systems` extra; see scripts/lightrag_bridge.py.
 index_command = ".venv/bin/python scripts/lightrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output} {incremental_flag}"
 query_command = ".venv/bin/python scripts/lightrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"

@@ -91,3 +91,8 @@ community, and report workflows operate across the full corpus; its own cache
 provides safe reuse when that corpus unit is retried. Store the bridge scripts
 and their lock files in the study archive; the complete command template is
 also embedded in the experiment manifest.
+
+Set `systems.lightrag.chunk_llm_concurrency` to a positive integer to control
+LightRAG's `llm_model_max_async` limit during chunk extraction. The default is
+`1` when omitted, which is serial. This setting does not change embedding or
+document concurrency; the active example sets it explicitly to `4`.
