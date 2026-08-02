@@ -111,6 +111,21 @@ It maps `_id` to the question ID, `input` to `question`, `answers` to
 evidence. It refuses to overwrite existing output; pass `--force` only when
 regenerating those inputs intentionally.
 
+To create a separate, internally consistent small subset without changing the
+full inputs, use a different output prefix and the deterministic limits:
+
+```bash
+python scripts/convert_ultradomain_jsonl.py \
+  --input data/raw/ultradomain_agriculture/agriculture.jsonl \
+  --domain agriculture_subset \
+  --max-documents 6 \
+  --max-questions 3
+```
+
+This writes `agriculture_subset_documents.jsonl` and
+`agriculture_subset_questions.jsonl`. Documents are selected by stable ID;
+questions are selected only when their evidence document is in that subset.
+
 ## Command sequence
 
 ```bash
