@@ -37,6 +37,9 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--phase", choices=("pilot", "full"), required=True)
     run_parser.add_argument("--systems", default="naive,graphrag,lightrag")
     run_parser.add_argument("--repetition", default=1, type=int)
+    run_parser.add_argument("--resume", action="store_true", help="Resume the latest compatible incomplete run")
+    run_parser.add_argument("--allow-partial-index", action="store_true", help="Run queries against an incomplete index and mark their traces")
+    run_parser.add_argument("--index-retries", default=2, type=int, help="Retries per failed index checkpoint unit (default: 2)")
     update = commands.add_parser("run-update", help="Run auditable 90/10 update workflow")
     update.add_argument("--systems", default="naive,graphrag,lightrag")
     score = commands.add_parser("score", help="Export evaluator input, compute deterministic proxies, or import scores")
@@ -94,11 +97,18 @@ def main(argv: list[str] | None = None) -> int:
             print("Run blocked:\n" + "\n".join(f"- {item}" for item in errors), file=sys.stderr)
             return 2
         if args.command == "run":
-            result = run(config, args.phase, systems, args.repetition)
+            try:
+                result = run(config, args.phase, systems, args.repetition, resume=args.resume, allow_partial_index=args.allow_partial_index, index_retries=args.index_retries)
+            except KeyboardInterrupt:
+                print("Run interrupted; resume with the same command plus --resume.", file=sys.stderr)
+                return 130
+            except (RuntimeError, ValueError) as exc:
+                print(f"Run failed: {exc}", file=sys.stderr)
+                return 1
         else:
             result = run_update(config, systems)
         print(json.dumps(result, indent=2))
-        return 0
+        return 0 if not isinstance(result, dict) or result.get("complete", True) else 1
     if args.command == "score":
         source = args.input or (config.output_root / "query_traces.jsonl")
         if not source.exists():

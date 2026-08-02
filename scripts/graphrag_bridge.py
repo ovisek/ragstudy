@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+from collections import deque
 from pathlib import Path
 
 if sys.version_info >= (3, 11):
@@ -25,7 +27,28 @@ def config(path: Path) -> dict:
 
 
 def run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1)
+    stdout_lines: deque[str] = deque(maxlen=4000)
+    stderr_lines: deque[str] = deque(maxlen=4000)
+
+    def copy_stream(source, target, captured: deque[str]) -> None:
+        assert source is not None
+        for line in iter(source.readline, ""):
+            captured.append(line)
+            target.write(line)
+            target.flush()
+        source.close()
+
+    threads = [
+        threading.Thread(target=copy_stream, args=(process.stdout, sys.stdout, stdout_lines), daemon=True),
+        threading.Thread(target=copy_stream, args=(process.stderr, sys.stderr, stderr_lines), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return_code = process.wait()
+    for thread in threads:
+        thread.join()
+    result = subprocess.CompletedProcess(command, return_code, "".join(stdout_lines), "".join(stderr_lines))
     if result.returncode:
         raise RuntimeError("Command failed:\n" + " ".join(command) + "\n" + result.stderr[-4000:])
     return result
@@ -132,4 +155,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

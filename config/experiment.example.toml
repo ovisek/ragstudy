@@ -83,12 +83,14 @@ kind = "native"
 
 [systems.graphrag]
 kind = "command"
+index_checkpoint = "corpus"
 # Requires the pinned `systems` extra; see scripts/graphrag_bridge.py.
 index_command = ".venv/bin/python scripts/graphrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
 query_command = ".venv/bin/python scripts/graphrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"
 
 [systems.lightrag]
 kind = "command"
+index_checkpoint = "document"
 # Requires the pinned `systems` extra; see scripts/lightrag_bridge.py.
-index_command = ".venv/bin/python scripts/lightrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
+index_command = ".venv/bin/python scripts/lightrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output} {incremental_flag}"
 query_command = ".venv/bin/python scripts/lightrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"

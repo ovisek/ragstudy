@@ -163,43 +163,45 @@ ragstudy --config config/experiment.toml analyse
 ragstudy --config config/experiment.toml thesis
 ```
 
-`run` is resumable: an existing `(dataset, system, question_id, repetition)`
-trace is never overwritten. Delete neither failures nor timeouts; correct the
-configuration and start a new run identifier instead.
+### Incremental progress and resume
 
-### Resume interrupted GraphRAG indexing in the same workspace
+Index and query progress is printed immediately. Command-adapter stdout and
+stderr are also appended to per-attempt files under
+`results/runs/<run_id>/<dataset>/<system>/logs/`; the configured API-key value
+is redacted from both destinations. Index attempts are recorded append-only in
+`index_progress.jsonl`, and `index_summary.json` is refreshed after every
+checkpoint unit.
 
-If GraphRAG indexing is interrupted (for example `Ctrl+C`), rerunning
-`ragstudy ... run` creates a new `run_id` and a new workspace. To continue the
-same GraphRAG workspace (and reuse its cache), rerun GraphRAG directly against
-that existing `--root` directory:
-
-```bash
-# Use the same shell environment as the original run.
-export OPENAI_API_KEY="your-key-here"
-
-# Optional if your proxy uses a custom CA.
-export SSL_CERT_FILE="/absolute/path/to/company-root-ca.pem"
-export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
-
-.venv/bin/graphrag index \
-  --root results/runs/<run_id>/<dataset>/graphrag \
-  --method standard
-```
-
-Progress is written to:
+A normal `run` always starts a fresh, independent run. Resume the newest
+compatible incomplete run explicitly:
 
 ```bash
-tail -f results/runs/<run_id>/<dataset>/graphrag/logs/indexing-engine.log
+.venv/bin/ragstudy --config config/experiment.toml run \
+  --phase pilot --systems lightrag --resume
 ```
 
-Notes:
+Resume refuses to combine changed configuration, prepared documents, or
+questions with an earlier run. It skips successful index units and successful
+queries from that run, while retrying failed, interrupted, and pending work.
+Each index unit is retried twice by default; change this with
+`--index-retries N`.
 
-- `index_run.json` and `index_command_report.json` are written by the harness
-  after `adapter.index(...)` returns. If the process is interrupted before
-  completion, those final files may not exist yet for that run.
-- To finish the full harness flow after manual GraphRAG completion, start a new
-  `ragstudy run` for normal trace/manifests or add a resume mode in the harness.
+Checkpoint granularity is backend-safe: NaiveRAG and LightRAG checkpoint each
+document, while GraphRAG checkpoints its corpus-level workflow and reuses its
+native cache. `Ctrl+C` records the active attempt as interrupted and exits 130.
+
+If index failures remain, queries for that index are skipped and the command
+exits nonzero. For diagnostic use only, queries may be forced against the
+partial index:
+
+```bash
+.venv/bin/ragstudy --config config/experiment.toml run \
+  --phase pilot --systems lightrag --resume --allow-partial-index
+```
+
+Such traces include `index_complete: false` and the failed unit IDs. They are
+rerun after the index is completed and are never treated as complete traces by
+resume.
 
 ## Adapter contract
 
@@ -209,8 +211,8 @@ bridges: `scripts/graphrag_bridge.py` (GraphRAG 3.1.0) and
 `scripts/lightrag_bridge.py` (LightRAG 1.4.14). Their commands are already set
 in `config/experiment.toml`; install the `systems` dependency extra before
 running them.
-Templates receive `{workspace}`, `{input}`, `{question}`, `{method}`, and
-`{output}`. The query command must write one JSON object to `{output}` with
+Templates receive `{workspace}`, `{input}`, `{question}`, `{method}`,
+`{output}`, and `{incremental_flag}`. The query command must write one JSON object to `{output}` with
 `answer`, optional `contexts`, optional `usage`, and optional `metadata`.
 
 This contract makes every external system produce the same query trace without

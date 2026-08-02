@@ -79,10 +79,15 @@ configuration already has these command entries:
 ```toml
 [systems.graphrag]
 kind = "command"
+index_checkpoint = "corpus"
 index_command = ".venv/bin/python scripts/graphrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
 query_command = ".venv/bin/python scripts/graphrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"
 ```
 
-The same shape is configured for LightRAG. Store the bridge scripts and their
-lock files in the study archive; the complete command template is also embedded
-in the experiment manifest.
+LightRAG uses `index_checkpoint = "document"` and accepts
+`{incremental_flag}` in its index command. Every checkpoint attempt is journaled
+before and after execution. GraphRAG remains corpus-granular because its graph,
+community, and report workflows operate across the full corpus; its own cache
+provides safe reuse when that corpus unit is retried. Store the bridge scripts
+and their lock files in the study archive; the complete command template is
+also embedded in the experiment manifest.

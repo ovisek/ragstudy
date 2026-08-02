@@ -30,6 +30,20 @@ def usage_dict(value: object) -> dict[str, int]:
     return {"input_tokens": int(value.get("input_tokens", value.get("prompt_tokens", 0)) or 0), "output_tokens": int(value.get("output_tokens", value.get("completion_tokens", 0)) or 0), "api_calls": int(value.get("api_calls", 0) or 0), "retries": int(value.get("retries", 0) or 0)}
 
 
+def status_record(value: object) -> dict:
+    if value is None:
+        return {"status": "missing"}
+    if isinstance(value, dict):
+        record = dict(value)
+    elif hasattr(value, "__dict__"):
+        record = dict(vars(value))
+    else:
+        record = {"status": str(value)}
+    status = record.get("status", "unknown")
+    record["status"] = str(getattr(status, "value", status)).lower()
+    return json.loads(json.dumps(record, ensure_ascii=False, default=str))
+
+
 async def build_rag(study: dict, workspace: Path):
     try:
         from lightrag import LightRAG
@@ -57,14 +71,21 @@ async def build_rag(study: dict, workspace: Path):
 async def run_index(args: argparse.Namespace, study: dict) -> None:
     workspace, output = Path(args.workspace), Path(args.output)
     rows = [json.loads(line) for line in Path(args.input).read_text(encoding="utf-8").splitlines() if line.strip()]
+    print(f"LightRAG: initializing workspace {workspace}", flush=True)
     rag = await build_rag(study, workspace)
     try:
+        print(f"LightRAG: inserting {len(rows)} document(s)", flush=True)
         await rag.ainsert([row["text"] for row in rows], ids=[row["id"] for row in rows])
-        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "incremental": Path(args.input).name.startswith("incremental_")}
+        statuses = {row["id"]: status_record(await rag.doc_status.get_by_id(row["id"])) for row in rows}
+        unsuccessful = {doc_id: status for doc_id, status in statuses.items() if status["status"] not in {"processed", "completed"}}
+        if unsuccessful:
+            raise RuntimeError(f"LightRAG did not complete document(s): {json.dumps(unsuccessful, ensure_ascii=False, default=str)}")
+        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "incremental": args.incremental}
     finally:
         await rag.finalize_storages()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"LightRAG: completed {len(rows)} document(s); wrote {output}", flush=True)
 
 
 async def run_query(args: argparse.Namespace, study: dict) -> None:
@@ -91,6 +112,7 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--question")
     parser.add_argument("--method", default="hybrid")
+    parser.add_argument("--incremental", action="store_true")
     args = parser.parse_args()
     study = config(Path(args.config))
     if args.action == "index":
@@ -106,4 +128,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
