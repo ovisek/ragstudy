@@ -50,6 +50,18 @@ class UltraDomainConversionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different text"):
             converter.convert(source, "https://example.test/source")
 
+    def test_subset_keeps_only_questions_supported_by_selected_documents(self) -> None:
+        documents = [{"id": "d1"}, {"id": "d2"}]
+        questions = [
+            {"id": "q1", "evidence": ["d1"]},
+            {"id": "q2", "evidence": ["d2"]},
+        ]
+
+        selected_documents, selected_questions = converter.subset(documents, questions, 1, 1)
+
+        self.assertEqual(selected_documents, [{"id": "d1"}])
+        self.assertEqual(selected_questions, [{"id": "q1", "evidence": ["d1"]}])
+
 
 if __name__ == "__main__":
     unittest.main()

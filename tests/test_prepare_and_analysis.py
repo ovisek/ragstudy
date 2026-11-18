@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ragstudy.analysis import analyse
 from ragstudy.config import load_config
-from ragstudy.evaluation import export_evaluation_inputs, score_retrieval_contract
+from ragstudy.evaluation import export_evaluation_inputs, import_metrics, score_retrieval_contract
 from ragstudy.io import append_jsonl, write_jsonl
 from ragstudy.prepare import make_update_split, prepare_dataset
 
@@ -56,3 +56,25 @@ class ExperimentHarnessTest(unittest.TestCase):
         self.assertGreater(result["summary_rows"], 0)
         self.assertTrue((self.config.output_root / "analysis" / "summary.csv").exists())
 
+    def test_metric_import_rejects_duplicate_identity(self) -> None:
+        source = self.root / "metrics.jsonl"
+        row = {
+            "run_id": "r1", "dataset": "ultradomain_agriculture", "system": "naive",
+            "question_id": "q1", "repetition": 1, "metric": "answer_relevancy",
+            "value": 0.5, "backend": "ragas", "coverage": "available",
+            "evaluator_model": "judge",
+        }
+        write_jsonl(source, [row])
+        self.assertEqual(import_metrics(self.config, source, "ragas"), 1)
+        with self.assertRaisesRegex(ValueError, "Duplicate metric identity"):
+            import_metrics(self.config, source, "ragas")
+
+    def test_metric_import_accepts_explicit_unavailable_value(self) -> None:
+        source = self.root / "unavailable.jsonl"
+        write_jsonl(source, [{
+            "run_id": "r1", "dataset": "ultradomain_agriculture", "system": "graphrag",
+            "question_id": "q1", "metric": "faithfulness", "value": None,
+            "backend": "ragas", "coverage": "unavailable", "reason": "contexts_unavailable",
+            "evaluator_model": "judge",
+        }])
+        self.assertEqual(import_metrics(self.config, source, "ragas"), 1)

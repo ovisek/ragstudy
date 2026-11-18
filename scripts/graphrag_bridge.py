@@ -12,22 +12,78 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
+import threading
+from collections import deque
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from ragstudy.usage_tracking import UsageRecorder, summarize_usage, usage_cost_usd
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 def config(path: Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
-def run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+def graphrag_cli() -> str:
+    """Return the GraphRAG console script installed with this Python."""
+    executable = Path(sys.executable).with_name("graphrag")
+    if not executable.is_file():
+        raise RuntimeError(
+            f"GraphRAG CLI is not installed beside the active Python interpreter: {executable}. "
+            "Install the project's systems extra in this environment."
+        )
+    return str(executable)
+
+
+def runtime_positive_int(environment_name: str, configured: object, label: str) -> int:
+    raw = os.getenv(environment_name)
+    if raw is None:
+        if isinstance(configured, bool) or not isinstance(configured, int) or configured < 1:
+            raise ValueError(f"{label} must be a positive integer")
+        return configured
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer") from exc
+    if parsed < 1 or raw.strip() != str(parsed):
+        raise ValueError(f"{label} must be a positive integer")
+    return parsed
+
+
+def run(command: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(command, env=env, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1)
+    stdout_lines: deque[str] = deque(maxlen=4000)
+    stderr_lines: deque[str] = deque(maxlen=4000)
+
+    def copy_stream(source, target, captured: deque[str]) -> None:
+        assert source is not None
+        for line in iter(source.readline, ""):
+            captured.append(line)
+            target.write(line)
+            target.flush()
+        source.close()
+
+    threads = [
+        threading.Thread(target=copy_stream, args=(process.stdout, sys.stdout, stdout_lines), daemon=True),
+        threading.Thread(target=copy_stream, args=(process.stderr, sys.stderr, stderr_lines), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return_code = process.wait()
+    for thread in threads:
+        thread.join()
+    result = subprocess.CompletedProcess(command, return_code, "".join(stdout_lines), "".join(stderr_lines))
     if result.returncode:
         raise RuntimeError("Command failed:\n" + " ".join(command) + "\n" + result.stderr[-4000:])
     return result
 
 
-def environment(study: dict) -> dict[str, str]:
+def environment(study: dict, *, workspace: Path | None = None, operation: str | None = None) -> dict[str, str]:
     provider = study["provider"]
     api_key = os.getenv(provider["api_key_env"])
     if not api_key:
@@ -37,6 +93,26 @@ def environment(study: dict) -> dict[str, str]:
     # of .env files and pass it only to the child CLI process.
     env["GRAPHRAG_API_KEY"] = api_key
     env["GRAPHRAG_LLM_API_KEY"] = api_key
+    # NLTK's import-security hook otherwise treats a project-local .venv as
+    # untrusted when GraphRAG inherits the repository root as its CWD.
+    env["PYTHONSAFEPATH"] = "1"
+    if workspace is not None and operation is not None:
+        hook_dir = Path(__file__).resolve().parent / "graphrag_usage_hook"
+        existing_pythonpath = env.get("PYTHONPATH")
+        source_dir = Path(__file__).resolve().parents[1] / "src"
+        python_paths = [str(hook_dir), str(source_dir)]
+        if existing_pythonpath:
+            python_paths.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(python_paths)
+        env["RAGSTUDY_USAGE_EVENTS"] = str(workspace / "usage_events.jsonl")
+        env["RAGSTUDY_USAGE_OPERATION"] = operation
+    ca_bundle = provider.get("ca_bundle")
+    if ca_bundle:
+        ca_path = Path(ca_bundle).expanduser()
+        if not ca_path.is_file():
+            raise RuntimeError(f"Configured provider.ca_bundle is not a readable file: {ca_path}")
+        env["SSL_CERT_FILE"] = str(ca_path)
+        env["REQUESTS_CA_BUNDLE"] = str(ca_path)
     return env
 
 
@@ -60,41 +136,64 @@ def configure_settings(workspace: Path, study: dict) -> None:
         raise RuntimeError("GraphRAG installation must include PyYAML") from exc
     path = workspace / "settings.yaml"
     settings = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    models = settings.setdefault("models", {})
     provider, common = study["provider"], study["common"]
-    chat = models.setdefault("default_chat_model", {})
-    chat.update({"type": "openai_chat", "model": provider["generator_model"], "api_key": "${GRAPHRAG_API_KEY}", "encoding_model": "cl100k_base"})
-    embedding = models.setdefault("default_embedding_model", {})
-    embedding.update({"type": "openai_embedding", "model": provider["embedding_model"], "api_key": "${GRAPHRAG_API_KEY}", "encoding_model": "cl100k_base"})
+    requests_per_minute = runtime_positive_int("RAGSTUDY_REQUESTS_PER_MINUTE", provider.get("requests_per_minute", 30), "provider.requests_per_minute")
+    rate_limit = {"type": "sliding_window", "period_in_seconds": 60, "requests_per_period": requests_per_minute}
+    # Long GraphRAG workflows must survive transient provider throttling. The
+    # default seven retries proved insufficient for the NVIDIA endpoint during
+    # description summarization, where one exhausted request aborts the entire
+    # pipeline. Keep retries bounded and auditable in generated settings.
+    retry = {
+        "type": "exponential_backoff",
+        "max_retries": int(provider.get("max_request_retries", 30)),
+        "base_delay": 2.0,
+        "jitter": True,
+        "max_delay": 60.0,
+    }
+    completion_models = settings.setdefault("completion_models", {})
+    chat = completion_models.setdefault("default_completion_model", {})
+    chat.update({"model_provider": "openai", "model": provider["generator_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "rate_limit": rate_limit, "retry": retry})
+    embedding_models = settings.setdefault("embedding_models", {})
+    embedding = embedding_models.setdefault("default_embedding_model", {})
+    embedding.update({"model_provider": "openai", "model": provider["embedding_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "rate_limit": rate_limit, "retry": retry})
+    settings["concurrent_requests"] = runtime_positive_int("RAGSTUDY_CONCURRENT_WORKERS", study["common"].get("concurrent_workers", 1), "common.concurrent_workers")
     # The v3 generated defaults own the rest of the workflow configuration.
-    chunks = settings.setdefault("chunks", {})
-    chunks["size"] = int(common["chunk_tokens"])
-    chunks["overlap"] = int(common["chunk_overlap_tokens"])
+    chunking = settings.setdefault("chunking", {})
+    chunking["size"] = int(common["chunk_tokens"])
+    chunking["overlap"] = int(common["chunk_overlap_tokens"])
     path.write_text(yaml.safe_dump(settings, sort_keys=False), encoding="utf-8")
 
 
 def index(args: argparse.Namespace, study: dict) -> None:
     workspace, source, output = Path(args.workspace), Path(args.input), Path(args.output)
     workspace.mkdir(parents=True, exist_ok=True)
-    env = environment(study)
+    env = environment(study, workspace=workspace, operation="index")
+    recorder = UsageRecorder(workspace / "usage_events.jsonl", system="graphrag", operation="index")
+    usage_snapshot = recorder.snapshot()
     if not (workspace / "settings.yaml").exists():
-        run(["graphrag", "init", "--root", str(workspace), "--force"], env)
-        configure_settings(workspace, study)
+        provider = study["provider"]
+        run([graphrag_cli(), "init", "--root", str(workspace), "--model", provider["generator_model"], "--embedding", provider["embedding_model"], "--force"], env, workspace)
+    configure_settings(workspace, study)
     documents = write_inputs(workspace, source)
-    completed = run(["graphrag", "index", "--root", str(workspace), "--method", "standard"], env)
+    completed = run([graphrag_cli(), "index", "--root", str(workspace), "--method", "standard"], env, workspace)
     artifacts = list((workspace / "output").rglob("*.parquet")) if (workspace / "output").exists() else []
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"implementation": "microsoft/graphrag", "documents": documents, "parquet_artifacts": len(artifacts), "stdout_tail": completed.stdout[-2000:]}, indent=2) + "\n", encoding="utf-8")
+    usage = summarize_usage(recorder.events_since(usage_snapshot))
+    output.write_text(json.dumps({"implementation": "microsoft/graphrag", "documents": documents, "parquet_artifacts": len(artifacts), "stdout_tail": completed.stdout[-2000:], "usage": usage, "estimated_cost_usd": usage_cost_usd(usage, study["provider"])}, indent=2) + "\n", encoding="utf-8")
 
 
 def query(args: argparse.Namespace, study: dict) -> None:
     workspace, output = Path(args.workspace), Path(args.output)
-    env = environment(study)
+    env = environment(study, workspace=workspace, operation="query")
+    recorder = UsageRecorder(workspace / "usage_events.jsonl", system="graphrag", operation="query")
+    usage_snapshot = recorder.snapshot()
+    configure_settings(workspace, study)
     method = {"hybrid": "local", "local": "local", "global": "global"}.get(args.method, "local")
-    completed = run(["graphrag", "query", "--root", str(workspace), "--method", method, "--query", args.question], env)
+    completed = run([graphrag_cli(), "query", "--root", str(workspace), "--method", method, args.question], env, workspace)
     answer = completed.stdout.strip()
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"answer": answer, "contexts": [], "usage": {}, "metadata": {"implementation": "microsoft/graphrag==3.1.0", "requested_method": args.method, "executed_method": method, "context_trace": "unavailable_from_official_CLI"}}, indent=2) + "\n", encoding="utf-8")
+    usage = summarize_usage(recorder.events_since(usage_snapshot))
+    output.write_text(json.dumps({"answer": answer, "contexts": [], "usage": usage, "metadata": {"implementation": "microsoft/graphrag", "requested_method": args.method, "executed_method": method, "context_trace": "unavailable_from_official_CLI", "usage_breakdown": usage["by_operation_model"], "usage_unknown_output_calls": usage["unknown_output_calls"], "estimated_cost_usd": usage_cost_usd(usage, study["provider"])}}, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -121,4 +220,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -19,10 +19,20 @@ For every query, the configured `query_command` must create `{output}`:
 }
 ```
 
-Usage fields are zero only when the upstream package cannot expose them. State
-that limitation in the methodology and retain the package logs in the adapter
-workspace. A query without context trace may still be scored for faithfulness
+Both included bridges append one record per provider attempt to
+`{workspace}/usage_events.jsonl`. Records distinguish index/query and
+generator/embedding calls, retain the model ID and success/failure status, and
+label token counts as `provider`, `estimated`, or `partial_estimate`. Failed
+calls receive an input-token estimate and an unknown (`null`) output count.
+Bridge outputs and the pilot `run_summary.json` aggregate this journal by
+operation and model; the journal remains the auditable source of truth across
+retries and resumed runs. A query without context trace may still be scored for faithfulness
 when valid, but it must be marked unavailable for retrieval-context metrics.
+
+The native NaiveRAG adapter writes the same journal contract. It disables
+opaque SDK retries and records each explicit provider attempt, allowing the
+pilot collector to compare index/query and generator/embedding usage across all
+three systems without reconstructing token splits from aggregate traces.
 
 ## GraphRAG
 
@@ -66,8 +76,9 @@ Map harness modes as follows:
 | `global` | `global` |
 | `hybrid` | `hybrid` |
 
-Pass LightRAG's token tracker into each LLM role where the pinned version
-supports it, and export its token tracker result into `usage`. Export retrieved
+Pass LightRAG's token tracker into each LLM role, including the embedding role,
+and export its token tracker result into `usage`. Disable opaque SDK retries so
+the bridge can journal and rate-limit each attempt explicitly. Export retrieved
 chunk IDs/text where the version permits; otherwise write `metadata` explaining
 the unavailable trace.
 
@@ -79,10 +90,20 @@ configuration already has these command entries:
 ```toml
 [systems.graphrag]
 kind = "command"
+index_checkpoint = "corpus"
 index_command = ".venv/bin/python scripts/graphrag_bridge.py index --config config/experiment.toml --workspace {workspace} --input {input} --output {output}"
 query_command = ".venv/bin/python scripts/graphrag_bridge.py query --config config/experiment.toml --workspace {workspace} --question {question} --method {method} --output {output}"
 ```
 
-The same shape is configured for LightRAG. Store the bridge scripts and their
-lock files in the study archive; the complete command template is also embedded
-in the experiment manifest.
+LightRAG uses `index_checkpoint = "document"` and accepts
+`{incremental_flag}` in its index command. Every checkpoint attempt is journaled
+before and after execution. GraphRAG remains corpus-granular because its graph,
+community, and report workflows operate across the full corpus; its own cache
+provides safe reuse when that corpus unit is retried. Store the bridge scripts
+and their lock files in the study archive; the complete command template is
+also embedded in the experiment manifest.
+
+Set `systems.lightrag.chunk_llm_concurrency` to a positive integer to control
+LightRAG's `llm_model_max_async` limit during chunk extraction. The default is
+`1` when omitted, which is serial. This setting does not change embedding or
+document concurrency; the active example sets it explicitly to `4`.
