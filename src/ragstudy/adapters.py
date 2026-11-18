@@ -19,6 +19,7 @@ from typing import Any
 from .config import Config
 from .io import append_jsonl, read_jsonl, sha256_text, write_json, write_jsonl
 from .models import Document, Question, Usage
+from .usage_tracking import UsageRecorder, estimate_tokens, summarize_usage
 
 
 def _now() -> str:
@@ -139,22 +140,59 @@ class NaiveRagAdapter(RagAdapter):
     def __init__(self, config: Config, system: str, workspace: Path):
         super().__init__(config, system, workspace)
         try:
-            from openai import OpenAI
+            from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
         except ImportError as exc:
             raise RuntimeError("Install the providers extra: pip install -e '.[providers]'") from exc
         provider = config.data["provider"]
         api_key = os.environ.get(provider["api_key_env"])
         if not api_key:
             raise RuntimeError(f"Missing {provider['api_key_env']}")
-        self.client = OpenAI(api_key=api_key, base_url=provider["base_url"])
+        self.client = OpenAI(api_key=api_key, base_url=provider["base_url"], max_retries=0)
+        self.retryable_errors = (APIConnectionError, APIStatusError, APITimeoutError, RateLimitError)
         self.provider = provider
         self.common = config.data["common"]
         self.index_file = self.workspace / "naive_index.jsonl"
 
-    def _embed(self, texts: list[str]) -> tuple[list[list[float]], Usage]:
-        response = self.client.embeddings.create(model=self.provider["embedding_model"], input=texts)
+    def _is_retryable(self, exc: Exception) -> bool:
+        if not isinstance(exc, self.retryable_errors):
+            return False
+        status_code = getattr(exc, "status_code", None)
+        return status_code is None or status_code in {408, 409, 429} or int(status_code) >= 500
+
+    def _provider_call(self, call, *, operation: str, model: str, model_kind: str, request_value: Any, output_value) -> Any:
+        recorder = UsageRecorder(self.workspace / "usage_events.jsonl", system=self.system, operation=operation, phase=str(getattr(self, "phase", "unknown")))
+        for attempt in range(1, 4):
+            try:
+                response = call()
+            except Exception as exc:
+                recorder.record(model=model, model_kind=model_kind, input_tokens=estimate_tokens(request_value, model), output_tokens=None, usage_source="partial_estimate", status="failed", error=str(exc), attempt=attempt)
+                if attempt == 3 or not self._is_retryable(exc):
+                    raise
+                time.sleep(2 ** (attempt - 1))
+                continue
+            raw_usage = getattr(response, "usage", None)
+            converted = _usage_from(raw_usage)
+            if raw_usage is None or (converted.input_tokens == 0 and converted.output_tokens == 0):
+                input_tokens = estimate_tokens(request_value, model)
+                result_value = output_value(response)
+                output_tokens = 0 if model_kind == "embedding" else estimate_tokens(result_value, model)
+                usage_source = "estimated"
+            else:
+                input_tokens = converted.input_tokens
+                output_tokens = converted.output_tokens
+                usage_source = "provider"
+            recorder.record(model=model, model_kind=model_kind, input_tokens=input_tokens, output_tokens=output_tokens, usage_source=usage_source, status="ok", attempt=attempt)
+            return response
+        raise AssertionError("unreachable")
+
+    def _embed(self, texts: list[str], operation: str) -> tuple[list[list[float]], Usage]:
+        response = self._provider_call(
+            lambda: self.client.embeddings.create(model=self.provider["embedding_model"], input=texts),
+            operation=operation, model=self.provider["embedding_model"], model_kind="embedding",
+            request_value=texts, output_value=lambda _: "",
+        )
         vectors = [item.embedding for item in response.data]
-        return vectors, _usage_from(response.usage)
+        return vectors, _usage_from(getattr(response, "usage", None))
 
     def index(self, documents: list[Document], incremental: bool = False, resume: bool = False, retries: int = 2) -> dict[str, Any]:
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -184,7 +222,7 @@ class NaiveRagAdapter(RagAdapter):
                     attempt_usage = Usage()
                     for start in range(0, len(chunks), 64):
                         batch = chunks[start : start + 64]
-                        vectors, batch_usage = self._embed([chunk["text"] for chunk in batch])
+                        vectors, batch_usage = self._embed([chunk["text"] for chunk in batch], "index")
                         attempt_usage.add(batch_usage)
                         document_records.extend({**chunk, "embedding": vector} for chunk, vector in zip(batch, vectors, strict=True))
                     write_jsonl(artifact, document_records)
@@ -225,20 +263,21 @@ class NaiveRagAdapter(RagAdapter):
     def query(self, question: Question, method: str) -> tuple[str, list[dict[str, Any]], Usage, dict[str, Any]]:
         if not self.index_file.exists():
             raise RuntimeError("NaiveRAG index is absent")
-        vector, usage = self._embed([question.question])
+        vector, usage = self._embed([question.question], "query")
         records = read_jsonl(self.index_file)
         ranked = sorted(records, key=lambda item: self._cosine(vector[0], item["embedding"]), reverse=True)
         contexts = [{key: item[key] for key in ("id", "document_id", "title", "text")} | {"rank": rank + 1} for rank, item in enumerate(ranked[: int(self.common["top_k"])])]
         context_text = "\n\n".join(f"[{item['id']}] {item['text']}" for item in contexts)
-        response = self.client.chat.completions.create(
-            model=self.provider["generator_model"],
-            temperature=float(self.common["temperature"]),
-            messages=[
-                {"role": "system", "content": self.common["answer_prompt"]},
-                {"role": "user", "content": f"Question: {question.question}\n\nContext:\n{context_text}"},
-            ],
+        messages = [
+            {"role": "system", "content": self.common["answer_prompt"]},
+            {"role": "user", "content": f"Question: {question.question}\n\nContext:\n{context_text}"},
+        ]
+        response = self._provider_call(
+            lambda: self.client.chat.completions.create(model=self.provider["generator_model"], temperature=float(self.common["temperature"]), messages=messages),
+            operation="query", model=self.provider["generator_model"], model_kind="generator",
+            request_value=messages, output_value=lambda item: item.choices[0].message.content or "",
         )
-        usage.add(_usage_from(response.usage))
+        usage.add(_usage_from(getattr(response, "usage", None)))
         answer = response.choices[0].message.content or ""
         return answer, contexts, usage, {"method": "dense_top_k", "requested_method": method}
 
@@ -258,6 +297,7 @@ class CommandAdapter(RagAdapter):
         provider = self.config.data.get("provider", {})
         environment["RAGSTUDY_REQUESTS_PER_MINUTE"] = str(provider.get("requests_per_minute", 30))
         environment["RAGSTUDY_CONCURRENT_WORKERS"] = str(self.config.data.get("common", {}).get("concurrent_workers", 1))
+        environment["RAGSTUDY_PHASE"] = str(getattr(self, "phase", "unknown"))
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=environment, start_new_session=True)
         stdout_lines: deque[str] = deque(maxlen=4000)
         stderr_lines: deque[str] = deque(maxlen=4000)
@@ -369,7 +409,9 @@ class CommandAdapter(RagAdapter):
                     time.sleep(2 ** retry_number)
 
         summary = _write_index_summary(self.workspace, backend=self.system, total=len(units), unit_hashes=unit_hashes)
-        return {**summary, "granularity": granularity, "incremental": incremental, "document_count": len(documents), "details": details, "command_report": str(self.workspace / "index_command_report.json")}
+        usage_events = read_jsonl(self.workspace / "usage_events.jsonl") if (self.workspace / "usage_events.jsonl").exists() else []
+        index_usage = summarize_usage([event for event in usage_events if event.get("operation") == "index"])
+        return {**summary, "granularity": granularity, "incremental": incremental, "document_count": len(documents), "details": details, "usage": index_usage, "command_report": str(self.workspace / "index_command_report.json"), "usage_events_path": str(self.workspace / "usage_events.jsonl")}
 
     def query(self, question: Question, method: str) -> tuple[str, list[dict[str, Any]], Usage, dict[str, Any]]:
         token = _unit_token(question.id)

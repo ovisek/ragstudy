@@ -11,6 +11,7 @@ from .acquire import acquire
 from .config import load_config, validate_run_config
 from .evaluation import export_evaluation_inputs, import_metrics, score_retrieval_contract
 from .manifest import freeze_manifest
+from .pilot_collection import collect_pilot, parse_run_selections
 from .prepare import make_update_split, prepare_dataset
 from .runner import run, run_update
 from .thesis import render_thesis_outputs
@@ -42,12 +43,24 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--index-retries", default=2, type=int, help="Retries per failed index checkpoint unit (default: 2)")
     run_parser.add_argument("--concurrent-workers", type=int, help="Override worker concurrency for GraphRAG and LightRAG for this launch/resume")
     run_parser.add_argument("--requests-per-minute", type=int, help="Override the provider RPM budget for this launch/resume")
-    update = commands.add_parser("run-update", help="Run auditable 90/10 update workflow")
-    update.add_argument("--systems", default="naive,graphrag,lightrag")
+    collect = commands.add_parser("collect-pilot", help="Collect exact independent pilot runs into an immutable comparative report")
+    collect.add_argument("--dataset", required=True)
+    collect.add_argument("--run", action="append", required=True, metavar="SYSTEM=RUN_ID", help="Exact single-system pilot run; repeat for naive, graphrag, and lightrag")
+    collect.add_argument("--allow-short-pilot", action="store_true", help="Explicitly accept fewer prepared questions than datasets.<name>.pilot_size")
+    update = commands.add_parser("run-update", help="Run auditable initial/pre-query/update/post-query workflow")
+    update.add_argument("--dataset", action="append", help="Configured dataset to run; repeat to select more than one")
+    update.add_argument("--systems", default="graphrag,lightrag")
+    update.add_argument("--index-retries", default=2, type=int, help="Retries per failed index checkpoint unit (default: 2)")
+    update.add_argument("--concurrent-workers", type=int, help="Override worker concurrency for this update run")
+    update.add_argument("--requests-per-minute", type=int, help="Override the provider RPM budget for this update run")
+    update.add_argument("--resume-run-id", help="Resume this exact update run and reuse completed indexes, caches, and traces")
     score = commands.add_parser("score", help="Export evaluator input, compute deterministic proxies, or import scores")
     score.add_argument("--input", default=None, type=Path, help="Trace JSONL; defaults to results/query_traces.jsonl")
     score.add_argument("--import-metrics", default=None, type=Path)
     score.add_argument("--backend", default="external")
+    score_mode = score.add_mutually_exclusive_group()
+    score_mode.add_argument("--export-only", action="store_true", help="Export evaluator inputs without writing metric results")
+    score_mode.add_argument("--import-only", action="store_true", help="Import metrics without re-exporting or recomputing deterministic proxies")
     commands.add_parser("analyse", help="Create bootstrapped summaries and paired tests")
     commands.add_parser("thesis", help="Generate a thesis-ready results draft from analysis")
     return root
@@ -98,10 +111,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print("Data gates passed. Use `run` only after reviewing the manifest and provider pricing snapshot.")
         return 0
+    if args.command == "collect-pilot":
+        try:
+            selections = parse_run_selections(args.run)
+            result = collect_pilot(config, args.dataset, selections, allow_short_pilot=args.allow_short_pilot)
+        except (RuntimeError, ValueError) as exc:
+            print(f"Pilot collection blocked: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2))
+        return 0
     if args.command in {"run", "run-update"}:
         systems = _systems(args.systems)
-        if args.command == "run":
-            apply_run_overrides(config, args)
+        apply_run_overrides(config, args)
         missing = [name for name in systems if name not in config.data["systems"]]
         errors = readiness(config) + [f"Unknown system: {item}" for item in missing] + validate_run_config(config, systems)
         if errors:
@@ -117,18 +138,52 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Run failed: {exc}", file=sys.stderr)
                 return 1
         else:
-            result = run_update(config, systems)
+            try:
+                result = run_update(
+                    config,
+                    systems,
+                    datasets=args.dataset,
+                    index_retries=args.index_retries,
+                    resume_run_id=args.resume_run_id,
+                )
+            except KeyboardInterrupt:
+                print("Update run interrupted; its manifest and completed records were preserved.", file=sys.stderr)
+                return 130
+            except (RuntimeError, ValueError) as exc:
+                print(f"Update run failed: {exc}", file=sys.stderr)
+                return 1
         print(json.dumps(result, indent=2))
         return 0 if not isinstance(result, dict) or result.get("complete", True) else 1
     if args.command == "score":
+        if args.import_only:
+            if not args.import_metrics:
+                print("--import-only requires --import-metrics", file=sys.stderr)
+                return 2
+            try:
+                imported = import_metrics(config, args.import_metrics, args.backend)
+            except ValueError as exc:
+                print(f"Metric import blocked: {exc}", file=sys.stderr)
+                return 1
+            print(json.dumps({"imported_metric_rows": imported}, indent=2))
+            return 0
+        if args.export_only and args.import_metrics:
+            print("--export-only cannot be combined with --import-metrics", file=sys.stderr)
+            return 2
         source = args.input or (config.output_root / "query_traces.jsonl")
         if not source.exists():
             print(f"Trace input missing: {source}", file=sys.stderr)
             return 2
         result = export_evaluation_inputs(config, source)
+        if args.export_only:
+            print(json.dumps(result, indent=2))
+            return 0
         result.update(score_retrieval_contract(config, source))
         if args.import_metrics:
-            result["imported_metric_rows"] = import_metrics(config, args.import_metrics, args.backend)
+            try:
+                result["imported_metric_rows"] = import_metrics(config, args.import_metrics, args.backend)
+            except ValueError as exc:
+                print(f"Metric import blocked: {exc}", file=sys.stderr)
+                return 1
         print(json.dumps(result, indent=2))
         return 0
     if args.command == "analyse":

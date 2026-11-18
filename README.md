@@ -156,8 +156,20 @@ ragstudy --config config/experiment.toml prepare \
 # Repeat prepare for every configured dataset, then verify all gates.
 ragstudy --config config/experiment.toml validate
 
-# First use a 20-question pilot. The command never changes the frozen sample.
-ragstudy --config config/experiment.toml run --phase pilot --systems naive,graphrag,lightrag
+# Run each pilot independently. Record the run_id printed by each command.
+ragstudy --config config/experiment.toml run --phase pilot --systems naive
+ragstudy --config config/experiment.toml run --phase pilot --systems graphrag
+ragstudy --config config/experiment.toml run --phase pilot --systems lightrag
+
+# Freeze the exact three runs into one auditable pilot report. The active
+# medical subset has 3 prepared questions versus pilot_size=20, so accepting
+# it requires an explicit, recorded exception.
+ragstudy --config config/experiment.toml collect-pilot \
+  --dataset graphrag_bench_medical \
+  --run naive=<NAIVE_RUN_ID> \
+  --run graphrag=<GRAPHRAG_RUN_ID> \
+  --run lightrag=<LIGHTRAG_RUN_ID> \
+  --allow-short-pilot
 
 # Only after pilot sign-off, run the fixed evaluation and the 90/10 update run.
 ragstudy --config config/experiment.toml run --phase full --systems naive,graphrag,lightrag
@@ -204,6 +216,30 @@ Each index unit is retried twice by default; change this with
 Checkpoint granularity is backend-safe: NaiveRAG and LightRAG checkpoint each
 document, while GraphRAG checkpoints its corpus-level workflow and reuses its
 native cache. `Ctrl+C` records the active attempt as interrupted and exits 130.
+
+### Collecting independent pilot runs
+
+`results/run_summary.json` is only a convenience pointer to the most recently
+finished run. Durable run summaries live under `results/runs/<run_id>/`, and
+the global query trace is append-only. Do not use either global file directly
+to compare independently launched systems.
+
+After all three single-system pilots are complete, use `collect-pilot` with
+their exact run IDs. Collection blocks incomplete indexes, missing questions,
+changed prepared inputs, incompatible frozen settings, and missing index/query
+usage. It ignores unrelated historical runs and trace rows. The resulting
+immutable directory is:
+
+```text
+results/collections/<dataset>/pilot-<selection-hash>/
+```
+
+Review `report.md` for pilot sign-off and retain `collection_manifest.json`,
+`summary.json`, `summary.csv`, `traces.jsonl`, `usage_events.jsonl`, and
+`quality_metrics.jsonl` as the source artifacts. Running the same collection
+command again returns the existing collection without rewriting it. Pilot
+quality is deterministic and descriptive; paid evaluator runs and inferential
+comparisons remain separate from collection.
 
 The provider request budget and shared worker concurrency are configured independently:
 

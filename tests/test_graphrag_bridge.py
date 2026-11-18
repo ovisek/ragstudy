@@ -45,6 +45,16 @@ class GraphRagBridgeCliTest(unittest.TestCase):
 
         self.assertEqual(environment["PYTHONSAFEPATH"], "1")
 
+    def test_child_environment_installs_per_attempt_usage_hook(self) -> None:
+        study = {"provider": {"api_key_env": "TEST_GRAPHRAG_KEY"}}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {"TEST_GRAPHRAG_KEY": "secret"}):
+            workspace = Path(temp_dir)
+            environment = bridge.environment(study, workspace=workspace, operation="query")
+
+        self.assertEqual(environment["RAGSTUDY_USAGE_EVENTS"], str(workspace / "usage_events.jsonl"))
+        self.assertEqual(environment["RAGSTUDY_USAGE_OPERATION"], "query")
+        self.assertIn("graphrag_usage_hook", environment["PYTHONPATH"])
+
     def test_settings_limit_concurrency_and_requests_per_minute(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -66,6 +76,9 @@ class GraphRagBridgeCliTest(unittest.TestCase):
             self.assertEqual(settings["concurrent_requests"], 1)
             self.assertEqual(settings["completion_models"]["default_completion_model"]["rate_limit"]["requests_per_period"], 30)
             self.assertEqual(settings["embedding_models"]["default_embedding_model"]["rate_limit"]["requests_per_period"], 30)
+            self.assertEqual(settings["completion_models"]["default_completion_model"]["retry"]["max_retries"], 30)
+            self.assertEqual(settings["completion_models"]["default_completion_model"]["retry"]["max_delay"], 60.0)
+            self.assertTrue(settings["embedding_models"]["default_embedding_model"]["retry"]["jitter"])
 
 
 if __name__ == "__main__":

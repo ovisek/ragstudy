@@ -16,6 +16,9 @@ import threading
 from collections import deque
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from ragstudy.usage_tracking import UsageRecorder, summarize_usage, usage_cost_usd
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -80,7 +83,7 @@ def run(command: list[str], env: dict[str, str], cwd: Path) -> subprocess.Comple
     return result
 
 
-def environment(study: dict) -> dict[str, str]:
+def environment(study: dict, *, workspace: Path | None = None, operation: str | None = None) -> dict[str, str]:
     provider = study["provider"]
     api_key = os.getenv(provider["api_key_env"])
     if not api_key:
@@ -93,6 +96,16 @@ def environment(study: dict) -> dict[str, str]:
     # NLTK's import-security hook otherwise treats a project-local .venv as
     # untrusted when GraphRAG inherits the repository root as its CWD.
     env["PYTHONSAFEPATH"] = "1"
+    if workspace is not None and operation is not None:
+        hook_dir = Path(__file__).resolve().parent / "graphrag_usage_hook"
+        existing_pythonpath = env.get("PYTHONPATH")
+        source_dir = Path(__file__).resolve().parents[1] / "src"
+        python_paths = [str(hook_dir), str(source_dir)]
+        if existing_pythonpath:
+            python_paths.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(python_paths)
+        env["RAGSTUDY_USAGE_EVENTS"] = str(workspace / "usage_events.jsonl")
+        env["RAGSTUDY_USAGE_OPERATION"] = operation
     ca_bundle = provider.get("ca_bundle")
     if ca_bundle:
         ca_path = Path(ca_bundle).expanduser()
@@ -126,12 +139,23 @@ def configure_settings(workspace: Path, study: dict) -> None:
     provider, common = study["provider"], study["common"]
     requests_per_minute = runtime_positive_int("RAGSTUDY_REQUESTS_PER_MINUTE", provider.get("requests_per_minute", 30), "provider.requests_per_minute")
     rate_limit = {"type": "sliding_window", "period_in_seconds": 60, "requests_per_period": requests_per_minute}
+    # Long GraphRAG workflows must survive transient provider throttling. The
+    # default seven retries proved insufficient for the NVIDIA endpoint during
+    # description summarization, where one exhausted request aborts the entire
+    # pipeline. Keep retries bounded and auditable in generated settings.
+    retry = {
+        "type": "exponential_backoff",
+        "max_retries": int(provider.get("max_request_retries", 30)),
+        "base_delay": 2.0,
+        "jitter": True,
+        "max_delay": 60.0,
+    }
     completion_models = settings.setdefault("completion_models", {})
     chat = completion_models.setdefault("default_completion_model", {})
-    chat.update({"model_provider": "openai", "model": provider["generator_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "rate_limit": rate_limit})
+    chat.update({"model_provider": "openai", "model": provider["generator_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "rate_limit": rate_limit, "retry": retry})
     embedding_models = settings.setdefault("embedding_models", {})
     embedding = embedding_models.setdefault("default_embedding_model", {})
-    embedding.update({"model_provider": "openai", "model": provider["embedding_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "rate_limit": rate_limit})
+    embedding.update({"model_provider": "openai", "model": provider["embedding_model"], "api_key": "${GRAPHRAG_API_KEY}", "api_base": provider["base_url"], "rate_limit": rate_limit, "retry": retry})
     settings["concurrent_requests"] = runtime_positive_int("RAGSTUDY_CONCURRENT_WORKERS", study["common"].get("concurrent_workers", 1), "common.concurrent_workers")
     # The v3 generated defaults own the rest of the workflow configuration.
     chunking = settings.setdefault("chunking", {})
@@ -143,7 +167,9 @@ def configure_settings(workspace: Path, study: dict) -> None:
 def index(args: argparse.Namespace, study: dict) -> None:
     workspace, source, output = Path(args.workspace), Path(args.input), Path(args.output)
     workspace.mkdir(parents=True, exist_ok=True)
-    env = environment(study)
+    env = environment(study, workspace=workspace, operation="index")
+    recorder = UsageRecorder(workspace / "usage_events.jsonl", system="graphrag", operation="index")
+    usage_snapshot = recorder.snapshot()
     if not (workspace / "settings.yaml").exists():
         provider = study["provider"]
         run([graphrag_cli(), "init", "--root", str(workspace), "--model", provider["generator_model"], "--embedding", provider["embedding_model"], "--force"], env, workspace)
@@ -152,18 +178,22 @@ def index(args: argparse.Namespace, study: dict) -> None:
     completed = run([graphrag_cli(), "index", "--root", str(workspace), "--method", "standard"], env, workspace)
     artifacts = list((workspace / "output").rglob("*.parquet")) if (workspace / "output").exists() else []
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"implementation": "microsoft/graphrag", "documents": documents, "parquet_artifacts": len(artifacts), "stdout_tail": completed.stdout[-2000:]}, indent=2) + "\n", encoding="utf-8")
+    usage = summarize_usage(recorder.events_since(usage_snapshot))
+    output.write_text(json.dumps({"implementation": "microsoft/graphrag", "documents": documents, "parquet_artifacts": len(artifacts), "stdout_tail": completed.stdout[-2000:], "usage": usage, "estimated_cost_usd": usage_cost_usd(usage, study["provider"])}, indent=2) + "\n", encoding="utf-8")
 
 
 def query(args: argparse.Namespace, study: dict) -> None:
     workspace, output = Path(args.workspace), Path(args.output)
-    env = environment(study)
+    env = environment(study, workspace=workspace, operation="query")
+    recorder = UsageRecorder(workspace / "usage_events.jsonl", system="graphrag", operation="query")
+    usage_snapshot = recorder.snapshot()
     configure_settings(workspace, study)
     method = {"hybrid": "local", "local": "local", "global": "global"}.get(args.method, "local")
-    completed = run([graphrag_cli(), "query", "--root", str(workspace), "--method", method, "--query", args.question], env, workspace)
+    completed = run([graphrag_cli(), "query", "--root", str(workspace), "--method", method, args.question], env, workspace)
     answer = completed.stdout.strip()
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"answer": answer, "contexts": [], "usage": {}, "metadata": {"implementation": "microsoft/graphrag==3.1.0", "requested_method": args.method, "executed_method": method, "context_trace": "unavailable_from_official_CLI"}}, indent=2) + "\n", encoding="utf-8")
+    usage = summarize_usage(recorder.events_since(usage_snapshot))
+    output.write_text(json.dumps({"answer": answer, "contexts": [], "usage": usage, "metadata": {"implementation": "microsoft/graphrag", "requested_method": args.method, "executed_method": method, "context_trace": "unavailable_from_official_CLI", "usage_breakdown": usage["by_operation_model"], "usage_unknown_output_calls": usage["unknown_output_calls"], "estimated_cost_usd": usage_cost_usd(usage, study["provider"])}}, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> int:

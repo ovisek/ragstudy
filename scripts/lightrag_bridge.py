@@ -11,9 +11,13 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from ragstudy.usage_tracking import ModelUsageTracker, UsageRecorder, estimate_tokens, summarize_usage, usage_cost_usd
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -84,6 +88,70 @@ def embedding_dimension(study: dict) -> int:
     return value
 
 
+def embedding_timeout_seconds(study: dict) -> int:
+    value = study["provider"].get("embedding_timeout_seconds", 600)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("provider.embedding_timeout_seconds must be a positive integer")
+    return value
+
+
+def generator_request_timeout_seconds(study: dict) -> int:
+    value = study["provider"].get("generator_request_timeout_seconds", 300)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            "provider.generator_request_timeout_seconds must be a positive integer"
+        )
+    return value
+
+
+def generator_worker_timeout_seconds(study: dict) -> int:
+    value = study["provider"].get("generator_worker_timeout_seconds", 600)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            "provider.generator_worker_timeout_seconds must be a positive integer"
+        )
+    return value
+
+
+def request_max_attempts(study: dict) -> int:
+    value = study["provider"].get("request_max_attempts", 3)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("provider.request_max_attempts must be a positive integer")
+    return value
+
+
+def retry_delays(study: dict, retries: int) -> list[float]:
+    provider = study["provider"]
+    base = float(provider.get("retry_backoff_seconds", 4.0))
+    maximum = float(provider.get("retry_max_delay_seconds", 60.0))
+    if base <= 0 or maximum <= 0:
+        raise ValueError("provider retry delays must be positive")
+    return [min(maximum, base * (2 ** attempt) + random.uniform(0.0, min(1.0, base))) for attempt in range(retries)]
+
+
+def is_retryable_provider_error(exc: Exception, retryable: tuple[type[BaseException], ...]) -> bool:
+    if not isinstance(exc, retryable):
+        return False
+    status_code = getattr(exc, "status_code", None)
+    return status_code is None or status_code in {408, 409, 429} or int(status_code) >= 500
+
+
+def environment_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def lightrag_cache_settings(study: dict, operation: str | None = None) -> dict[str, bool]:
+    configured = study.get("systems", {}).get("lightrag", {})
+    settings = {
+        "enable_llm_cache": bool(configured.get("enable_llm_cache", False)),
+        "enable_llm_cache_for_entity_extract": bool(configured.get("enable_llm_cache_for_entity_extract", False)),
+        "enable_embedding_cache": bool(configured.get("enable_embedding_cache", False)),
+    }
+    if operation == "query" and environment_flag("RAGSTUDY_BYPASS_QUERY_CACHE"):
+        settings["enable_llm_cache"] = False
+    return settings
+
+
 class AsyncRequestPacer:
     """Space API request starts so a fast endpoint cannot exceed its RPM cap."""
 
@@ -102,33 +170,115 @@ class AsyncRequestPacer:
             self._next_request = time.monotonic() + self.minimum_interval
 
 
-async def build_rag(study: dict, workspace: Path):
+async def build_rag(study: dict, workspace: Path, operation: str):
     try:
         from lightrag import LightRAG
-        from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+        from lightrag.llm.openai import InvalidResponseError, openai_complete_if_cache, openai_embed
         from lightrag.utils import wrap_embedding_func_with_attrs
+        from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
     except ImportError as exc:
         raise RuntimeError("Install the pinned systems extra before running LightRAG") from exc
     provider, common = study["provider"], study["common"]
     concurrency = concurrent_workers(study)
     dimension = embedding_dimension(study)
+    embedding_timeout = embedding_timeout_seconds(study)
+    generator_request_timeout = generator_request_timeout_seconds(study)
+    generator_worker_timeout = generator_worker_timeout_seconds(study)
+    max_attempts = request_max_attempts(study)
+    delays = retry_delays(study, max_attempts - 1)
+    cache_settings = lightrag_cache_settings(study, operation)
     pacer = AsyncRequestPacer(requests_per_minute(study))
     api_key = os.getenv(provider["api_key_env"])
     if not api_key:
         raise RuntimeError(f"Missing {provider['api_key_env']}")
 
+    recorder = UsageRecorder(workspace / "usage_events.jsonl", system="lightrag", operation=operation)
+    retryable_completion = (RateLimitError, APIConnectionError, APIStatusError, APITimeoutError, InvalidResponseError)
+    retryable_embedding = (RateLimitError, APIConnectionError, APIStatusError, APITimeoutError)
+
+    async def tracked_call(func, *, tracker, request_value, retryable, output_kind, **kwargs):
+        # Bypass LightRAG's opaque tenacity wrapper and the OpenAI SDK's own
+        # retries so every actual provider attempt becomes one auditable event.
+        raw_func = getattr(func, "__wrapped__", func)
+        for attempt in range(max_attempts):
+            tracker.attempt = attempt + 1
+            await pacer.wait()
+            before = tracker.event_count
+            try:
+                result = await raw_func(token_tracker=tracker, **kwargs)
+                if tracker.event_count == before:
+                    recorder.record(
+                        model=tracker.model,
+                        model_kind=tracker.model_kind,
+                        input_tokens=estimate_tokens(request_value, tracker.model),
+                        output_tokens=0 if output_kind == "embedding" else estimate_tokens(result, tracker.model),
+                        usage_source="estimated",
+                        status="ok",
+                        attempt=attempt + 1,
+                    )
+                return result
+            except Exception as exc:
+                recorder.record(
+                    model=tracker.model,
+                    model_kind=tracker.model_kind,
+                    input_tokens=estimate_tokens(request_value, tracker.model),
+                    output_tokens=None,
+                    usage_source="partial_estimate",
+                    status="failed",
+                    error=str(exc),
+                    attempt=attempt + 1,
+                )
+                if not is_retryable_provider_error(exc, retryable) or attempt == max_attempts - 1:
+                    raise
+                await asyncio.sleep(delays[attempt])
+
     async def completion(prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs):
-        await pacer.wait()
-        return await openai_complete_if_cache(provider["generator_model"], prompt, system_prompt=system_prompt, history_messages=history_messages, api_key=api_key, base_url=provider["base_url"], keyword_extraction=keyword_extraction, **kwargs)
+        request_value = {"system_prompt": system_prompt, "history_messages": history_messages, "prompt": prompt}
+        client_configs = dict(kwargs.pop("openai_client_configs", {}) or {})
+        client_configs["max_retries"] = 0
+        client_configs["timeout"] = generator_request_timeout
+        tracker = ModelUsageTracker(recorder, model=provider["generator_model"], model_kind="generator")
+        return await tracked_call(
+            openai_complete_if_cache,
+            tracker=tracker,
+            request_value=request_value,
+            retryable=retryable_completion,
+            output_kind="completion",
+            model=provider["generator_model"], prompt=prompt, system_prompt=system_prompt,
+            history_messages=history_messages, api_key=api_key, base_url=provider["base_url"],
+            keyword_extraction=keyword_extraction, openai_client_configs=client_configs, **kwargs,
+        )
 
     @wrap_embedding_func_with_attrs(embedding_dim=dimension, max_token_size=8192, model_name=provider["embedding_model"])
     async def embeddings(texts):
-        await pacer.wait()
-        return await openai_embed.func(texts, model=provider["embedding_model"], api_key=api_key, base_url=provider["base_url"])
+        tracker = ModelUsageTracker(recorder, model=provider["embedding_model"], model_kind="embedding")
+        return await tracked_call(
+            openai_embed.func,
+            tracker=tracker,
+            request_value=texts,
+            retryable=retryable_embedding,
+            output_kind="embedding",
+            texts=texts, model=provider["embedding_model"], api_key=api_key,
+            base_url=provider["base_url"], embedding_dim=dimension, max_token_size=8192,
+            client_configs={"max_retries": 0},
+        )
 
-    rag = LightRAG(working_dir=str(workspace), llm_model_func=completion, llm_model_name=provider["generator_model"], llm_model_max_async=concurrency, embedding_func=embeddings, chunk_token_size=int(common["chunk_tokens"]), chunk_overlap_token_size=int(common["chunk_overlap_tokens"]), enable_llm_cache=False, enable_llm_cache_for_entity_extract=False, embedding_cache_config={"enabled": False})
+    rag = LightRAG(working_dir=str(workspace), llm_model_func=completion, llm_model_name=provider["generator_model"], llm_model_max_async=concurrency, default_llm_timeout=generator_worker_timeout, embedding_func=embeddings, default_embedding_timeout=embedding_timeout, chunk_token_size=int(common["chunk_tokens"]), chunk_overlap_token_size=int(common["chunk_overlap_tokens"]), enable_llm_cache=cache_settings["enable_llm_cache"], enable_llm_cache_for_entity_extract=cache_settings["enable_llm_cache_for_entity_extract"], embedding_cache_config={"enabled": cache_settings["enable_embedding_cache"]})
     await rag.initialize_storages()
-    return rag
+    return rag, recorder
+
+
+async def finalize_rag(rag) -> None:
+    """Flush storages and stop LightRAG's background priority workers."""
+    await rag.finalize_storages()
+    worker_functions = (
+        getattr(rag, "llm_model_func", None),
+        getattr(getattr(rag, "embedding_func", None), "func", None),
+    )
+    for worker_function in worker_functions:
+        shutdown = getattr(worker_function, "shutdown", None)
+        if shutdown is not None:
+            await shutdown()
 
 
 async def run_index(args: argparse.Namespace, study: dict) -> None:
@@ -136,7 +286,8 @@ async def run_index(args: argparse.Namespace, study: dict) -> None:
     rows = [json.loads(line) for line in Path(args.input).read_text(encoding="utf-8").splitlines() if line.strip()]
     concurrency = concurrent_workers(study)
     print(f"LightRAG: initializing workspace {workspace} (concurrent workers: {concurrency})", flush=True)
-    rag = await build_rag(study, workspace)
+    rag, recorder = await build_rag(study, workspace, "index")
+    usage_snapshot = recorder.snapshot()
     try:
         print(f"LightRAG: inserting {len(rows)} document(s)", flush=True)
         await rag.ainsert([row["text"] for row in rows], ids=[row["id"] for row in rows])
@@ -144,9 +295,11 @@ async def run_index(args: argparse.Namespace, study: dict) -> None:
         unsuccessful = {doc_id: status for doc_id, status in statuses.items() if status["status"] not in {"processed", "completed"}}
         if unsuccessful:
             raise RuntimeError(f"LightRAG did not complete document(s): {json.dumps(unsuccessful, ensure_ascii=False, default=str)}")
-        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "concurrent_workers": concurrency, "incremental": args.incremental}
+        usage = summarize_usage(recorder.events_since(usage_snapshot))
+        notional_cost = usage_cost_usd(usage, study["provider"])
+        result = {"implementation": "HKUDS/LightRAG==1.4.14", "documents_inserted": len(rows), "document_statuses": statuses, "concurrent_workers": concurrency, "incremental": args.incremental, "cache_settings": lightrag_cache_settings(study, "index"), "request_max_attempts": request_max_attempts(study), "usage": usage, "actual_api_expenditure_usd": 0.0, "notional_estimated_cost_usd": notional_cost, "estimated_cost_usd": notional_cost}
     finally:
-        await rag.finalize_storages()
+        await finalize_rag(rag)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"LightRAG: completed {len(rows)} document(s); wrote {output}", flush=True)
@@ -155,14 +308,17 @@ async def run_index(args: argparse.Namespace, study: dict) -> None:
 async def run_query(args: argparse.Namespace, study: dict) -> None:
     from lightrag import QueryParam
     workspace, output = Path(args.workspace), Path(args.output)
-    rag = await build_rag(study, workspace)
+    rag, recorder = await build_rag(study, workspace, "query")
+    usage_snapshot = recorder.snapshot()
     try:
         mode = {"local": "local", "global": "global", "hybrid": "hybrid"}.get(args.method, "hybrid")
         param = QueryParam(mode=mode, top_k=int(study["common"]["top_k"]), user_prompt=study["common"]["answer_prompt"])
         answer = await rag.aquery(args.question, param=param)
-        result = {"answer": answer, "contexts": [], "usage": {}, "metadata": {"implementation": "HKUDS/LightRAG==1.4.14", "requested_method": args.method, "executed_method": mode, "context_trace": "unavailable_from_core_API"}}
+        usage = summarize_usage(recorder.events_since(usage_snapshot))
+        notional_cost = usage_cost_usd(usage, study["provider"])
+        result = {"answer": answer, "contexts": [], "usage": usage, "metadata": {"implementation": "HKUDS/LightRAG==1.4.14", "requested_method": args.method, "executed_method": mode, "context_trace": "unavailable_from_core_API", "cache_settings": lightrag_cache_settings(study, "query"), "query_cache_bypassed": environment_flag("RAGSTUDY_BYPASS_QUERY_CACHE"), "request_max_attempts": request_max_attempts(study), "usage_breakdown": usage["by_operation_model"], "usage_unknown_output_calls": usage["unknown_output_calls"], "actual_api_expenditure_usd": 0.0, "notional_estimated_cost_usd": notional_cost, "estimated_cost_usd": notional_cost}}
     finally:
-        await rag.finalize_storages()
+        await finalize_rag(rag)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 

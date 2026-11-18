@@ -33,6 +33,7 @@ def export_evaluation_inputs(config: Config, traces_path: Path) -> dict[str, int
         contexts = [item.get("text", "") for item in trace.get("contexts", [])]
         common = {
             "trace_key": f"{trace['dataset']}::{trace['system']}::{trace['question_id']}::{trace.get('repetition', 1)}",
+            "run_id": trace.get("run_id"),
             "dataset": trace["dataset"], "system": trace["system"], "question_id": trace["question_id"],
             "question": trace["question"], "answer": trace.get("answer", ""), "contexts": contexts,
             "reference_answer": source.get("reference_answer"), "evidence": source.get("evidence", []),
@@ -75,6 +76,19 @@ def import_metrics(config: Config, path: Path, backend: str) -> int:
     """
     rows = read_jsonl(path)
     required = {"dataset", "system", "question_id", "metric", "value"}
+    output = config.output_root / "metric_results.jsonl"
+    existing = read_jsonl(output) if output.exists() else []
+
+    def identity(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            row.get("run_id"), row.get("dataset"), row.get("system"),
+            row.get("question_id"), int(row.get("repetition", 1)),
+            row.get("metric"), row.get("backend", backend),
+            row.get("evaluator_model"),
+        )
+
+    seen = {identity(row) for row in existing}
+    prepared: list[dict[str, Any]] = []
     for row in rows:
         absent = required - set(row)
         if absent:
@@ -82,6 +96,11 @@ def import_metrics(config: Config, path: Path, backend: str) -> int:
         row.setdefault("backend", backend)
         row.setdefault("coverage", "available")
         row.setdefault("repetition", 1)
-        append_jsonl(config.output_root / "metric_results.jsonl", row)
-    return len(rows)
-
+        key = identity(row)
+        if key in seen:
+            raise ValueError(f"Duplicate metric identity: {key}")
+        seen.add(key)
+        prepared.append(row)
+    for row in prepared:
+        append_jsonl(output, row)
+    return len(prepared)

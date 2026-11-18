@@ -29,6 +29,16 @@ class RunOverrideTest(unittest.TestCase):
         self.assertEqual(config.data["provider"]["requests_per_minute"], 25)
         self.assertEqual(config.data["systems"], {"graphrag": {}, "lightrag": {}})
 
+    def test_collect_pilot_parser_accepts_exact_runs_and_short_override(self) -> None:
+        args = parser().parse_args([
+            "collect-pilot", "--dataset", "medical",
+            "--run", "naive=r1", "--run", "graphrag=r2", "--run", "lightrag=r3",
+            "--allow-short-pilot",
+        ])
+        self.assertEqual(args.command, "collect-pilot")
+        self.assertEqual(args.run, ["naive=r1", "graphrag=r2", "lightrag=r3"])
+        self.assertTrue(args.allow_short_pilot)
+
 
 if __name__ == "__main__":
     unittest.main()
